@@ -9,6 +9,51 @@ Build Zapier integrations with Node.js using the CLI at https://github.com/zapie
 
 Current CLI version: **18.1.0**. Integrations run on Node.js **v22**.
 
+---
+
+## Build Process
+
+When starting a new integration (or adding to an existing one), always work through this process before writing any code. The goal is to arrive at a shared understanding of scope and a clear implementation plan — surprises mid-build are expensive.
+
+### Step 1: Gather requirements
+
+Ask these questions upfront (some may already be answered in the conversation):
+
+- **What API are we integrating with?** Get a link to the docs.
+- **What should trigger a Zap?** New record, status change, incoming webhook, etc. For each trigger: what event, what data should come through?
+- **Does the API support webhooks**, or will we need to poll an endpoint?
+- **What actions (creates) should users be able to perform?** e.g. create a record, send a message, update a status.
+- **Any search/lookup actions needed?** e.g. find a contact by email.
+- **Is this a private integration** (for Dennis's own use or a specific client's Zapier account), or will it go through Zapier's public review process? This affects validation strictness and certain design decisions.
+- **Any known constraints?** Rate limits, pagination quirks, unusual auth flow, sandbox vs. production environments.
+
+### Step 2: Review the API documentation
+
+Before scaffolding anything, fetch and read the API docs. Extract:
+
+- **Auth type and credential fields** — what does the user need to provide? (API key, OAuth client ID/secret, subdomain, etc.)
+- **Relevant endpoints** — URL patterns, HTTP methods, required/optional params, response shapes
+- **Pagination approach** — offset/limit, cursor-based, page number, or Link header
+- **Rate limits** — requests per minute/hour, and whether the API returns retry-after headers
+- **Webhook support** — if REST Hooks are possible, find the subscribe/unsubscribe endpoints and the payload structure
+- **Error response format** — how does the API signal auth failures, not-found, rate limiting, validation errors?
+
+If the API has a sandbox/test environment, note the base URL difference.
+
+### Step 3: Propose an implementation plan
+
+Before writing code, summarise and confirm with Dennis:
+
+- Chosen auth type and why
+- List of triggers (key, noun, polling vs. REST Hook)
+- List of creates and searches
+- Any non-obvious design decisions (e.g. using dehydration for expensive fields, dynamic dropdowns, pagination strategy)
+- Any gaps or ambiguities that need resolving
+
+Get sign-off, then scaffold.
+
+---
+
 ## Quick Reference
 
 | Concept | What It Does | Key Command |
@@ -198,6 +243,45 @@ const perform = async (z, bundle) => {
 
 Since core v10+, `response.throwForStatus()` is called automatically. Set `skipThrowForStatus: true` on the request to handle errors yourself.
 
+## Pagination
+
+Pagination is required whenever an API endpoint returns results across multiple pages. Handle it differently depending on context:
+
+**Polling triggers** — Zapier's deduper means you typically only need to fetch the first page (most recent results). Avoid fetching all pages on every poll; it's slow and burns rate limit.
+
+**Dynamic dropdowns and searches** — these may need full pagination so users see all available options. Use `bundle.meta.page` (0-indexed) for offset-based APIs:
+
+```js
+perform: async (z, bundle) => {
+  const response = await z.request({
+    url: 'https://example.com/api/contacts',
+    params: {
+      page: bundle.meta.page + 1,  // if API is 1-indexed
+      per_page: 100,
+    },
+  });
+  return response.data.contacts;
+},
+canPaginate: true,
+```
+
+**Cursor-based pagination** — use `z.cursor` to persist the cursor between pages (primarily for dynamic dropdowns):
+
+```js
+perform: async (z, bundle) => {
+  const cursor = await z.cursor.get();
+  const response = await z.request({
+    url: 'https://example.com/api/items',
+    params: { cursor: cursor || undefined, limit: 100 },
+  });
+  if (response.data.next_cursor) {
+    await z.cursor.set(response.data.next_cursor);
+  }
+  return response.data.items;
+},
+canPaginate: true,
+```
+
 ## Input Fields
 
 Define what users fill in when configuring a Zap step:
@@ -269,6 +353,8 @@ describe('triggers', () => {
 
 See `references/testing-deployment.md` for full deployment workflow.
 
+**Private vs. public integrations:** Private integrations (shared via `users:add`) skip Zapier's review process and have more relaxed validation requirements — sample data strictness and certain output field rules are enforced more tightly for public integrations. Most of Dennis's client work will be private.
+
 ```bash
 zapier-platform push                         # Deploy current version
 zapier-platform versions                     # List versions
@@ -324,3 +410,22 @@ if (!/^[a-z0-9-]+$/.test(bundle.authData.subdomain)) {
 npm install --save some-module
 ```
 Then use normally with `require()`. Modules are re-installed fresh during `zapier-platform push`.
+
+**Skipping expensive work during sample loading:**
+```js
+if (bundle.meta.isLoadingSample) {
+  return [sample]; // Return static sample data, skip the real API call
+}
+```
+
+## Common Gotchas
+
+These come up frequently — worth checking before debugging:
+
+- **Deduplication requires a stable `id` field.** Polling triggers use the `id` field to deduplicate. If the API doesn't return one at the top level, map or construct it explicitly.
+- **Polling triggers must return results newest-first.** Zapier processes the array in order and dedupes — if results are oldest-first, the deduper won't fire correctly on initial setup.
+- **`sample` must include all keys defined in `outputFields`.** If a key is in `outputFields` but missing from `sample`, Zapier's validator will complain and downstream Zap mapping will be broken.
+- **REST Hook triggers need both `performSubscribe` and `performUnsubscribe`.** Zapier calls unsubscribe when a Zap is turned off — skipping it leaves orphaned webhooks in the target system.
+- **`bundle.meta.isLoadingSample` is `true` during Zap setup.** Use this to return fast static data instead of making real API calls when the user is just configuring the Zap.
+- **`zapier-platform validate` catches many issues before push.** Run it before every push, especially if you've added new fields or changed output shapes.
+- **Environment variable keys are always uppercased by Zapier.** Set them that way from the start to avoid surprises.
