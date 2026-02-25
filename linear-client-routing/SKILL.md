@@ -30,3 +30,12 @@ When creating Linear issues for work.flowers clients, always look up the correct
 2. **Always use the Team ID** — pass the UUID from the table as the `team` parameter in `Linear:create_issue` or `Linear:update_issue`.
 3. **Ask if ambiguous** — if the user's reference could match multiple clients, ask which one they mean before creating the issue.
 4. **Unknown clients** — if a client isn't in this table, ask the user which Linear team to use rather than guessing.
+
+## Special Routing: Knoxx Foods
+
+For **Knoxx Foods** (KNOXX) issues, **do not use the standard Linear MCP server**. Instead, use the **Zapier MCP connector** which provides tools for managing issues in Knoxx's Linear workspace. This gives you access to Knoxx-specific integrations and workflow automations that aren't available through the standard Linear tools.
+
+When working on Knoxx issues:
+- Use `Zapier:linear_create_issue`, `Zapier:linear_update_issue`, `Zapier:linear_find_issue_by_id`, or `Zapier:linear_find_issues_by_name` instead of the standard `Linear:*` tools
+- You do not need to provide a team ID when using Zapier tools — they route directly to Knoxx's workspace
+- Reference the Team ID above (KNOXX: d401de3e-0e04-49bd-8bed-02c3227e827c) only if explicitly needed for context or documentation purposes
