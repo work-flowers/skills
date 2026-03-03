@@ -17,7 +17,7 @@ When creating Linear issues for work.flowers clients, always look up the correct
 | GGV    | Golden Gate Ventures               | 36053475-0bc5-4baa-8372-3c3c5aad3d1b |
 | KNOXX  | Knoxx Business Group Pty Ltd       | d401de3e-0e04-49bd-8bed-02c3227e827c |
 | MHA    | Ministry of Home Affairs Singapore | cdd76c98-e4b6-4a86-bc60-effc93000449 |
-| NTUC   | NTUC                				  | d19db0ae-0f6a-40c2-96a1-970999087d3f |
+| NTUC   | NTUC                               | d19db0ae-0f6a-40c2-96a1-970999087d3f |
 | SCW    | Secure Code Warrior                | 5706e4ec-8899-47be-9648-9d03edc58cb2 |
 | SKNA   | Sakana AI                          | d13c6be4-526d-4a10-9157-a9dd91f2a83f |
 | STA    | Start Right                        | 35200f37-11fc-46fb-ae66-7d69d9b79a7b |
@@ -28,8 +28,9 @@ When creating Linear issues for work.flowers clients, always look up the correct
 
 1. **Match by any identifier** — the user may refer to a client by full name, key, or abbreviation (e.g. "EF", "EliteFit", "EFAI" all map to EliteFit AI).
 2. **Always use the Team ID** — pass the UUID from the table as the `team` parameter in `Linear:create_issue` or `Linear:update_issue`.
-3. **Ask if ambiguous** — if the user's reference could match multiple clients, ask which one they mean before creating the issue.
-4. **Unknown clients** — if a client isn't in this table, ask the user which Linear team to use rather than guessing.
+3. **Default assignee** — unless the user specifies otherwise, assign all new issues to **Dennis Chiuten** (user ID: `bc780c50-f861-47cd-b7b6-e5dd734a75ce`). Pass this UUID as the `assignee` parameter when calling Linear tools.
+4. **Ask if ambiguous** — if the user's reference could match multiple clients, ask which one they mean before creating the issue.
+5. **Unknown clients** — if a client isn't in this table, ask the user which Linear team to use rather than guessing.
 
 ## Special Routing: Knoxx Foods
 
