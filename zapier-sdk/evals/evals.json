@@ -18,6 +18,12 @@
       "prompt": "What's the difference between the Zapier SDK and the Zapier Platform CLI? I want to integrate my client's app with Zapier so it shows up in their app directory.",
       "expected_output": "Should clearly explain that the SDK is for consuming existing integrations while the Platform CLI is for building new ones. Should direct the user toward the zapier-platform-cli skill for building integrations. Should NOT provide SDK setup instructions since the user's goal is building an integration.",
       "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "I have 3 Notion connections in my Zapier account — one for my personal workspace, one for our company workspace, and one for a client's workspace. I want to use the Zapier SDK CLI to create a page in the client's Notion workspace. How do I make sure I'm using the right connection, and what does the full workflow look like?",
+      "expected_output": "Should explain how to list-connections filtered to Notion, show how to identify the correct connection among multiple (via title, ID, or other metadata), use that specific connection ID when running the action, and walk through the create page action. Should address the multi-connection scenario explicitly rather than just using find-first-connection blindly.",
+      "files": []
     }
   ]
 }
