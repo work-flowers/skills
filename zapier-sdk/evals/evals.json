@@ -1,0 +1,23 @@
+{
+  "skill_name": "zapier-sdk",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "I need to send a message to my #ops channel in Slack via the Zapier SDK CLI. What's the fastest way?",
+      "expected_output": "Step-by-step CLI commands: find-first-connection for Slack, list-input-field-choices to find the channel, run-action to send the message. Should use correct command syntax and flags.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "prompt": "I want to pull all my Google Sheets connections and create a new spreadsheet with columns for Company, Contact, and Status. Show me the CLI commands.",
+      "expected_output": "CLI commands for: list-connections filtered to google-sheets, run-action to create_spreadsheet with headers, and ideally mention list-input-fields for discovering dynamic column fields when adding rows later.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "What's the difference between the Zapier SDK and the Zapier Platform CLI? I want to integrate my client's app with Zapier so it shows up in their app directory.",
+      "expected_output": "Should clearly explain that the SDK is for consuming existing integrations while the Platform CLI is for building new ones. Should direct the user toward the zapier-platform-cli skill for building integrations. Should NOT provide SDK setup instructions since the user's goal is building an integration.",
+      "files": []
+    }
+  ]
+}
