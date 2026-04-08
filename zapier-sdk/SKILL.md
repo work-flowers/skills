@@ -22,8 +22,51 @@ Rule of thumb: if the user wants to *call* an app's API, use this skill. If they
 - Node.js 20+
 - `npm install @zapier/zapier-sdk` (runtime)
 - `npm install -D @zapier/zapier-sdk-cli @types/node typescript` (dev/CLI)
-- Logged in: `npx zapier-sdk login` (opens browser)
+- Logged in (see authentication section below)
 - At least one connected app at https://zapier.com/app/assets/connections
+
+## Authentication — Local vs Headless Environments
+
+The SDK/CLI needs Zapier credentials. How you provide them depends on the environment:
+
+**Local terminal or Claude Code (has a browser):**
+```bash
+npx zapier-sdk login
+```
+This opens a browser for OAuth. Credentials are stored at `~/.config/zapier-sdk-cli-nodejs/config.json`.
+
+**Cowork, CI/CD, or any headless environment (no browser):**
+
+Browser-based login won't work here. Use **client credentials** instead:
+
+1. **Generate credentials once** from a local machine where you can open a browser:
+   ```bash
+   npx zapier-sdk create-client-credentials "cowork"
+   ```
+   Save the `client_id` and `client_secret` immediately — the secret is shown only once.
+
+2. **Use them in Cowork** by passing the flags to any CLI command:
+   ```bash
+   npx zapier-sdk list-connections \
+     --credentials-client-id YOUR_CLIENT_ID \
+     --credentials-client-secret YOUR_SECRET \
+     --owner me --json
+   ```
+
+   Or export them as environment variables to avoid repeating the flags:
+   ```bash
+   export ZAPIER_CLIENT_ID="your_client_id"
+   export ZAPIER_CLIENT_SECRET="your_client_secret"
+   npx zapier-sdk list-connections --owner me --json
+   ```
+
+For the TypeScript SDK, pass them at initialisation:
+```typescript
+const zapier = createZapierSdk({
+  clientId: process.env.ZAPIER_CLIENT_ID,
+  clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+});
+```
 
 ## CLI Workflow — The Core Loop
 
@@ -174,8 +217,8 @@ const { data: result } = await slack.write.channel_message({
 
 | Method | When to Use | Setup |
 |--------|-------------|-------|
-| **Browser login** | Local dev, CLI exploration | `npx zapier-sdk login` |
-| **Client credentials** | CI/CD, servers, serverless | `npx zapier-sdk create-client-credentials "my-app"` — save the secret immediately, it's shown only once |
+| **Browser login** | Local terminal, Claude Code | `npx zapier-sdk login` |
+| **Client credentials** | Cowork, CI/CD, servers, headless | `npx zapier-sdk create-client-credentials "my-app"` — save the secret immediately, it's shown only once. Pass via `--credentials-client-id` and `--credentials-client-secret` flags. |
 | **Direct token** | Partner OAuth, internal use | Pass token directly to `createZapierSdk()` |
 
 ## Zapier Tables
