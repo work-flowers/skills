@@ -41,9 +41,9 @@ For simple one-off reads (e.g. "look up this contact by email"), use the HubSpot
 
 4. **Read the relevant reference file** (see table below) — do not guess endpoints; they change.
 
-5. **Write a purpose-built script** — pagination, rate-limiting, and error handling baked in. Save to `/home/claude/` first, execute, then move outputs to `/mnt/user-data/outputs/`.
+5. **Write a purpose-built script** — pagination, rate-limiting, and error handling baked in. Save the script to a scratch location appropriate for the environment (Cowork's session scratch directory, Claude Code's current working directory, claude.ai's `/home/claude/`). Save any deliverables (CSVs, JSON exports, schema dumps) to a location the user can access and open — the exact path convention depends on the environment.
 
-6. **Execute and present results** — always show a summary of what was read/written. For writes, show a dry-run first unless the user has already confirmed.
+6. **Execute and present results** — always show a summary of what was read/written. For writes, show a dry-run first unless the user has already confirmed. Surface deliverable files using whatever mechanism the environment provides (`computer://` links in Cowork, `present_files` in claude.ai, plain paths in Claude Code).
 
 ## Authentication
 
@@ -131,9 +131,9 @@ Always check `X-HubSpot-RateLimit-Remaining` headers when running bulk jobs. Use
 
 ## Output and presentation
 
-- For read tasks: display a summary (count, sample) in chat; if large, save full output to CSV in `/mnt/user-data/outputs/` and use `present_files`
+- For read tasks: display a summary (count, sample) in chat; if large, save the full output as CSV to a location the user can access and surface it with the environment's file-sharing mechanism
 - For write tasks: report what was changed (count, IDs, field values), and flag any records that failed with the HubSpot error message
-- For schema/config exports (properties, workflow JSON, list definitions): save to markdown or JSON in `/mnt/user-data/outputs/` so Dennis can diff across portals
+- For schema/config exports (properties, workflow JSON, list definitions): save to markdown or JSON so Dennis can diff across portals; put them somewhere openable (not a scratch-only location that disappears at session end)
 
 ## Relationship to other skills
 

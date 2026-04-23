@@ -307,7 +307,9 @@ def export_to_csv(records, fieldnames, path):
     """
     records: list of dicts (e.g. [r.properties for r in results])
     fieldnames: ordered list of columns
-    path: pathlib.Path or string, e.g. /mnt/user-data/outputs/contacts.csv
+    path: pathlib.Path or string. Save to a location accessible to the user
+          in the current environment — the caller decides the convention
+          (Cowork workspace folder, Claude Code cwd, claude.ai outputs dir).
     """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
