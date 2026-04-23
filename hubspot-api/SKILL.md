@@ -37,7 +37,7 @@ For simple one-off reads (e.g. "look up this contact by email"), use the HubSpot
        raise SystemExit("HUBSPOT_ACCESS_TOKEN environment variable is not set.")
    ```
 
-3. **Confirm the target portal** with the user — ask which client's HubSpot this is for (Terrascope, Knoxx, etc.) and verify the token in scope matches that portal. Private app tokens start with `pat-na1-…` or `pat-eu1-…`.
+3. **Confirm the target portal** with the user — ask which client's HubSpot this is for (Terrascope, Knoxx, etc.) and verify the token in scope matches that portal. Private app tokens are prefixed with `pat-<region>-` where region indicates the portal's data centre (e.g. `pat-na1-`, `pat-na2-`, `pat-eu1-`). New regions are added periodically, so don't hardcode prefix checks.
 
 4. **Read the relevant reference file** (see table below) — do not guess endpoints; they change.
 

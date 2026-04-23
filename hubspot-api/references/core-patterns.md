@@ -291,11 +291,11 @@ resp = client.api_request({
 data = resp.json()
 
 # Handle errors manually on api_request
-if resp.status >= 400:
-    raise RuntimeError(f"{resp.status}: {resp.data.decode()}")
+if resp.status_code >= 400:
+    raise RuntimeError(f"{resp.status_code}: {resp.text}")
 ```
 
-`api_request` respects the client's `retry` configuration and auth, but does NOT raise on 4xx/5xx — check `resp.status` manually.
+`api_request` returns a standard `requests.Response` object — use `resp.status_code`, `resp.text`, `resp.json()`, and `resp.headers` as with any `requests` call. It respects the client's `retry` configuration and auth, but does NOT raise on 4xx/5xx — check `resp.status_code` manually.
 
 ## Exporting to CSV
 

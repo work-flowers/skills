@@ -86,8 +86,8 @@ def enrol_contact(client, user_id, contact_id, sequence_id, sender_email, sender
         "qs": {"userId": str(user_id)},
         "body": body,
     })
-    if resp.status >= 400:
-        raise RuntimeError(f"Enrolment failed ({resp.status}): {resp.data.decode()}")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Enrolment failed ({resp.status_code}): {resp.text}")
     return resp.json()
 ```
 
@@ -110,8 +110,8 @@ def unenrol(client, enrollment_id):
         "path": f"/automation/sequences/2026-03/enrollments/{enrollment_id}/cancel",
         "method": "POST",
     })
-    if resp.status >= 400:
-        raise RuntimeError(f"Unenrol failed: {resp.data.decode()}")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Unenrol failed: {resp.text}")
 ```
 
 Or find the active enrolment for a contact and cancel it:
