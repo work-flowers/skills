@@ -49,7 +49,7 @@ DB = {
 | `Deals` | Deals | `deals` |
 | `Meeting Notes` | Meeting Notes | `meeting_notes` |
 | `Emails` | Emails | `emails` |
-| `Clay Contacts` | Contacts | `contacts` |
+| `Contacts` | Contacts | `contacts` |
 | `Project Proposals` | Project Proposals | `project_proposals` |
 | `Sales Invoices` | Sales Invoices | `sales_invoices` |
 | `Legal Agreements` | Legal Agreements | — |
