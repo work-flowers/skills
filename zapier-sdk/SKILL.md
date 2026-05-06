@@ -1,6 +1,6 @@
 ---
 name: zapier-sdk
-description: "Guide for using the Zapier SDK and CLI to explore apps, discover actions, and run authenticated API calls against 9,000+ connected apps. Use this skill whenever the user mentions the Zapier SDK, zapier-sdk, @zapier/zapier-sdk, wants to call an external app's API through Zapier's auth infrastructure, needs to explore what actions an app supports, wants to run a one-off action via CLI (e.g. send a Slack message, create a Google Sheet, look up a HubSpot contact), or asks about making authenticated fetch/curl requests through Zapier. Also trigger when the user asks about Zapier connections, listing connected apps, or running actions against their Zapier-connected accounts. This skill is about CONSUMING Zapier's pre-built connectors (calling Slack, Google Sheets, Salesforce, etc. through Zapier's auth layer) -- NOT about BUILDING new Zapier integrations (that's the zapier-platform-cli and zapier-platform-ui skills instead)."
+description: "Guide for using the Zapier SDK and CLI to explore apps, discover actions, and run authenticated API calls against 9,000+ connected apps. Trigger when the user mentions the Zapier SDK, zapier-sdk, @zapier/zapier-sdk, wants to call a connected app's API through Zapier's auth infrastructure, run a one-off action via CLI (Slack message, Google Sheet, HubSpot lookup), make authenticated fetch/curl requests through Zapier, or list connected apps. Also trigger for using the SDK inside a Code by Zapier step — the @zapier/zapier-sdk toggle, the connections[] runtime map, calling zapier.apps.X or zapier.fetch from a Code step, or collapsing a multi-branch / multi-sub-zap workflow into one Code step. This skill is for CONSUMING Zapier's pre-built connectors, NOT for BUILDING new Zapier integrations (that's zapier-platform-cli and zapier-platform-ui)."
 ---
 
 # Zapier SDK — Explore Apps and Run Actions
@@ -213,10 +213,122 @@ const { data: result } = await slack.write.channel_message({
 });
 ```
 
+## Inside Code by Zapier — SDK in a Code Step
+
+The SDK can also run **inside** a JavaScript Code step in any Zap, with full access to your existing app connections — no embedded API keys, no client credentials. This is the right surface when the goal is to collapse a tangle of paths, loops, or sub-zaps into a single Code step inside the same Zap, where the visual editor has become unwieldy.
+
+### Enabling the SDK in a Code step
+
+1. In the Zap editor, add a **Code by Zapier** step → event **Run JavaScript** → **Open in Code Editor**.
+2. Click the **Packages** icon in the left sidebar.
+3. Toggle **`@zapier/zapier-sdk (latest)`** on. Zapier auto-imports the package and initialises `zapier` at the top of the file.
+
+The SDK is JavaScript only — Python Code steps don't support it. Code triggers (the trigger variant of Code by Zapier) also don't support the SDK; it's actions only.
+
+### Wiring connections
+
+Connections are wired through the UI, not in code:
+
+1. Click **Add app connection** → **+ Add connection**.
+2. Search for and select the app.
+3. Select an existing connected account from the **Select account connection** dropdown (or connect a new one).
+4. The **Account ID Variable** field auto-fills with a readable key based on the account label — for example `slack`, `google_sheets`, `notion`, `chatgpt`. You can edit this to anything (e.g. `slack_personal`, `sheets_reporting`); each key just needs to be unique within the step.
+
+That key becomes the lookup into a runtime `connections` map exposed inside the Code step. You don't see connection IDs anywhere in your code — Zapier resolves the key to the underlying connection at runtime, and credentials never appear in the code, the Zap history, or logs.
+
+Repeat for each app you want the step to call. Only the Zap owner can add or edit connections on the step; collaborators without access to the selected connections can't edit the step.
+
+### Calling actions
+
+Two patterns. Both work; pick whichever reads better for the step.
+
+**Proxy pattern** — bind the connection to an app once, then call actions cleanly:
+
+```javascript
+// (zapier is auto-imported — no createZapierSdk() call needed)
+
+const notion = zapier.apps.notion({ connectionId: connections["notion"] });
+
+const { data: page } = await notion.write.create_database_item({
+  inputs: {
+    database: "DB_ID",
+    title: inputData.title,
+  },
+});
+
+return { pageId: page.id };
+```
+
+**Direct `runAction` pattern** — useful when you want a single call, want the action key to be dynamic, or want to keep things flat:
+
+```javascript
+const { data } = await zapier.runAction({
+  appKey: "notion",
+  actionType: "write",
+  actionKey: "create_database_item",
+  connectionId: connections["notion"],
+  inputs: {
+    database: "DB_ID",
+    title: inputData.title,
+  },
+});
+```
+
+The newer suffix-less parameter names (`app` / `action` / `connection`) also work and are preferred in fresh code outside Code steps; the help article still uses the older `appKey`/`actionKey`/`connectionId` names, which is why the example above mirrors them.
+
+### Direct authenticated HTTP via `zapier.fetch`
+
+When the pre-built actions don't cover the endpoint, call the API directly. Zapier injects the connection's stored credentials (OAuth token, API key, signed headers — whatever the connection uses):
+
+```javascript
+const res = await zapier.fetch("https://api.notion.com/v1/databases/DB_ID/query", {
+  method: "POST",
+  connectionId: connections["notion"],
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ page_size: 50 }),
+});
+const result = await res.json();
+```
+
+`zapier.fetch` is the escape hatch for the long tail of endpoints that don't have a pre-built action.
+
+### Discovering app keys, action keys, and input fields
+
+The Code step UI doesn't tell you what to type. To find the right `appKey`, `actionKey`, and input field names, run the SDK CLI **locally** against the same Zapier account, then transcribe the values into your Code step. The CLI is the canonical discovery tool for this — see the **CLI Workflow** section above. Typical recipe:
+
+```bash
+npx zapier-sdk list-connections --owner me --json     # confirm app keys
+npx zapier-sdk list-actions notion --json             # find action keys
+npx zapier-sdk list-input-fields notion write create_database_item \
+  --connection-id 12345 --json                        # find input field names
+```
+
+You don't pass the `--connection-id` value into the Code step — it's only needed locally so the CLI can resolve dynamic fields. In the Code step, the value comes from `connections["notion"]`.
+
+### Limits and gotchas
+
+- **JavaScript only.** Python Code steps don't support the SDK.
+- **Actions only.** The SDK is not available in Code *triggers*. Triggers / event subscriptions inside Code steps are on the roadmap, not yet shipped.
+- **Per-step runtime caps still apply.** Same memory and wall-clock limits as any Code step — up to ~10 minutes on paid plans. Long-running scrapes or sync jobs that exceed this should run externally.
+- **Direct `zapier.fetch` calls aren't yet covered by org governance.** Pre-built actions respect your org's app/action restrictions; raw API calls don't yet. Direct API governance is on the roadmap.
+- **Credentials never appear in code, Zap history, or logs.** Expired or invalid connections produce a runtime error — re-authenticate in the Zap editor.
+- **Owner-only edits.** Only the Zap owner can add or change connections on the step.
+
+### When to prefer this over external SDK use
+
+Reach for SDK-in-Code-step when:
+
+- You're already inside a Zap and the logic has outgrown Paths / Filters / Looping by Zapier — multi-branch routing, nested loops, conditional retries — and the visual editor has become hard to read.
+- You'd otherwise build several sub-zaps stitched together with webhooks just to get the control flow right. One Code step with the SDK is usually clearer and cheaper.
+- The work is naturally part of *this* Zap's run (triggered by *this* trigger, using *this* run's data) and doesn't need to live in a separate codebase.
+
+Reach for the external SDK / CLI when the work is scheduled, long-running, agentic, lives in a product, or needs a real test/deploy lifecycle.
+
 ## Authentication Options
 
 | Method | When to Use | Setup |
 |--------|-------------|-------|
+| **In a Code step** | Logic that belongs inside a specific Zap | Toggle `@zapier/zapier-sdk (latest)` on in the Code editor's Packages panel; wire connections via the UI. No login or credentials needed. |
 | **Browser login** | Local terminal, Claude Code | `npx zapier-sdk login` |
 | **Client credentials** | Cowork, CI/CD, servers, headless | `npx zapier-sdk create-client-credentials "my-app"` — save the secret immediately, it's shown only once. Pass via `--credentials-client-id` and `--credentials-client-secret` flags. |
 | **Direct token** | Partner OAuth, internal use | Pass token directly to `createZapierSdk()` |

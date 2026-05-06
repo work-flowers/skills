@@ -2,6 +2,8 @@
 
 Full API reference for `@zapier/zapier-sdk` v0.40.1.
 
+> The same SDK surface is also available **inside a Code by Zapier step** — toggle `@zapier/zapier-sdk (latest)` in the Packages panel of the Code editor. Connections are wired through the UI rather than `findFirstConnection`, and surface as a runtime `connections["..."]` map. See the **Inside Code by Zapier** section in `SKILL.md` for the in-Zap workflow.
+
 ## Table of Contents
 
 1. [Initialisation](#initialisation)
