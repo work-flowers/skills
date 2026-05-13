@@ -1,98 +1,201 @@
 # Sync Patterns Reference
 
 Detailed guidance on building Worker syncs — scheduled jobs that pull external
-data into Notion databases.
+data into Notion databases managed by the Worker.
 
 ---
 
 ## Table of Contents
 
-1. [Sync Modes](#sync-modes)
-2. [Incremental Sync with Cursors](#incremental-sync-with-cursors)
-3. [Batch Pagination](#batch-pagination)
-4. [Backfill + Delta Pattern](#backfill--delta-pattern)
-5. [Schema Design](#schema-design)
-6. [Error Handling](#error-handling)
-7. [Troubleshooting](#troubleshooting)
+1. [Migration notes (April 2026 → current)](#migration-notes)
+2. [Architecture: database + sync split](#architecture-database--sync-split)
+3. [Sync Modes](#sync-modes)
+4. [Incremental Sync with Cursors](#incremental-sync-with-cursors)
+5. [Batch Pagination](#batch-pagination)
+6. [Backfill + Delta Pattern](#backfill--delta-pattern)
+7. [Cross-Database Relations](#cross-database-relations)
+8. [Schema and Builder Reference](#schema-and-builder-reference)
+9. [Rate Limiting with Pacers](#rate-limiting-with-pacers)
+10. [Error Handling](#error-handling)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Sync Modes
+## Migration notes
 
-### Replace Mode
+If you're updating a Worker built against the earlier sync API (April 2026 or
+older), here's what changed:
 
-Overwrites the entire dataset each run. Simple but expensive for large datasets.
-Best for small, frequently-changing datasets where you want a clean snapshot.
+- **Schema moved out of `worker.sync()`.** Declare the database with
+  `worker.database()` first, then attach syncs to it. The old
+  `schema: { properties: [{ name, type }] }` inline shape is gone.
+- **Three separate schema imports.** `j` from `@notionhq/workers/schema-builder`
+  is for tool I/O only. Database property *definitions* now come from `Schema`
+  (`@notionhq/workers/schema`), and property *values* in sync changes come
+  from `Builder` (`@notionhq/workers/builder`).
+- **Change records use `type` and `key`.** Each change is
+  `{ type: "upsert" | "delete", key, properties }`. The old `{ id, properties }`
+  shape and the use of `id` as the match field are gone — `key` matches the
+  value of `primaryKeyProperty` on the database.
+- **Replace mode does mark-and-sweep deletes.** Rows not seen by the time
+  `hasMore: false` returns are deleted automatically. The old "you must
+  explicitly delete everything" pattern is gone.
+- **Property values are tokens, not strings.** Set `Status` with
+  `Builder.select(item.status)`, not `item.status`. Same for dates, numbers,
+  emails, etc.
+- **Schedule minimum bumped to `5m`.** `1m` is no longer supported.
+- **Relations between Worker-managed databases** are now native via
+  `Schema.relation(databaseKey, { twoWay, relatedPropertyName })`.
+
+If you have a working sync on the old API, expect to rewrite the database
+declaration, the sync's `execute` return shape, and all property-value
+construction. The execute loop structure (`state`, `hasMore`, `nextState`) is
+unchanged.
+
+---
+
+## Architecture: database + sync split
+
+The new pattern is two steps. Declare the database first; it returns an opaque
+handle. Then register one or more syncs that target that handle.
 
 ```typescript
-worker.sync("dailyReport", {
-  title: "Daily Sales Report",
-  description: "Full refresh of today's sales data",
-  schedule: "1d",
-  mode: "replace",
+import { Worker } from "@notionhq/workers";
+import * as Schema from "@notionhq/workers/schema";
+import * as Builder from "@notionhq/workers/builder";
+
+const worker = new Worker();
+export default worker;
+
+// 1. Declare the managed database
+const issues = worker.database("issues", {
+  type: "managed",
+  initialTitle: "Issues",
+  primaryKeyProperty: "Issue ID",
   schema: {
-    properties: [
-      { name: "Order ID", type: "title" },
-      { name: "Customer", type: "rich_text" },
-      { name: "Amount", type: "number" },
-      { name: "Date", type: "date" },
-    ],
+    properties: {
+      Name: Schema.title(),
+      "Issue ID": Schema.richText(),
+      Status: Schema.select([
+        { name: "Open" },
+        { name: "Closed", color: "green" },
+      ]),
+      Priority: Schema.select([
+        { name: "Low" },
+        { name: "Medium" },
+        { name: "High", color: "red" },
+      ]),
+    },
   },
-  execute: async () => {
-    const data = await fetchTodaysSales();
+});
+
+// 2. Register a sync against it
+worker.sync("issuesSync", {
+  database: issues,
+  mode: "replace",
+  schedule: "1h",
+  execute: async (state) => {
+    const page = state?.page ?? 1;
+    const { items, hasMore } = await fetchIssues(page, 100);
     return {
-      changes: data.map(row => ({
-        id: row.orderId,
+      changes: items.map((item) => ({
+        type: "upsert" as const,
+        key: item.id,
         properties: {
-          "Order ID": row.orderId,
-          "Customer": row.customer,
-          "Amount": row.amount,
-          "Date": row.date,
+          Name: Builder.title(item.title),
+          "Issue ID": Builder.richText(item.id),
+          Status: Builder.select(item.status),
+          Priority: Builder.select(item.priority),
         },
       })),
-      hasMore: false,
-      nextState: {},
+      hasMore,
+      nextState: hasMore ? { page: page + 1 } : undefined,
     };
   },
 });
 ```
 
-### Incremental Mode
+A few things to note:
 
-Uses cursor state to fetch only new or changed records since the last run. More
-efficient for large, append-heavy datasets.
+- `primaryKeyProperty` must reference a property declared in `schema.properties`.
+  It's typically the upstream API's ID column.
+- The `key` field on each change record matches the value Notion stores in the
+  primary key property. Use the upstream record's ID.
+- `worker.database()` returns an opaque handle — pass it into `worker.sync()`'s
+  `database` field, don't try to inspect it.
+- Notion creates and migrates the managed database on every deploy. Schema
+  changes can drop data, so review before deploying.
+- Multiple syncs can target the same database — see the backfill + delta
+  pattern below.
+
+---
+
+## Sync Modes
+
+### Replace Mode (default)
+
+Every sync cycle returns the **full upstream dataset**. After the final
+`hasMore: false`, Notion deletes any rows that weren't seen during the cycle
+(mark-and-sweep). Best for small datasets (under ~10k records) or APIs that
+don't expose a change feed.
 
 ```typescript
-worker.sync("newOrders", {
-  title: "New Orders Sync",
-  description: "Incrementally syncs new orders since last check",
-  schedule: "15m",
-  mode: "incremental",
-  schema: {
-    properties: [
-      { name: "Order ID", type: "title" },
-      { name: "Customer", type: "rich_text" },
-      { name: "Amount", type: "number" },
-      { name: "Created At", type: "date" },
-    ],
-  },
-  execute: async ({ state }) => {
-    const since = state?.lastSync ?? new Date(0).toISOString();
-    const data = await fetchOrdersSince(since);
-
-    const now = new Date().toISOString();
+worker.sync("teamsSync", {
+  database: teams,
+  mode: "replace",
+  schedule: "1d",
+  execute: async (state) => {
+    const page = state?.page ?? 1;
+    const { items, hasMore } = await fetchTeams(page, 100);
     return {
-      changes: data.map(row => ({
-        id: row.orderId,
+      changes: items.map((item) => ({
+        type: "upsert" as const,
+        key: item.id,
         properties: {
-          "Order ID": row.orderId,
-          "Customer": row.customer,
-          "Amount": row.amount,
-          "Created At": row.createdAt,
+          Name: Builder.title(item.name),
+          ID: Builder.richText(item.id),
         },
       })),
-      hasMore: false,
-      nextState: { ...state, lastSync: now },
+      hasMore,
+      nextState: hasMore ? { page: page + 1 } : undefined,
+    };
+  },
+});
+```
+
+If your sync errors partway through a cycle, no deletions happen for that
+cycle — this is intentional to avoid data loss.
+
+### Incremental Mode
+
+Every cycle returns only **changes since the last cursor**. Rows not mentioned
+are left alone. Deletions must be explicit. Best for large datasets where the
+upstream API exposes change tracking.
+
+```typescript
+worker.sync("eventsSync", {
+  database: events,
+  mode: "incremental",
+  schedule: "5m",
+  execute: async (state) => {
+    const { upserts, deletes, nextCursor } = await fetchChanges(state?.cursor);
+    return {
+      changes: [
+        ...upserts.map((item) => ({
+          type: "upsert" as const,
+          key: item.id,
+          properties: {
+            Name: Builder.title(item.name),
+            ID: Builder.richText(item.id),
+          },
+        })),
+        ...deletes.map((id) => ({
+          type: "delete" as const,
+          key: id,
+        })),
+      ],
+      hasMore: Boolean(nextCursor),
+      nextState: nextCursor ? { cursor: nextCursor } : undefined,
     };
   },
 });
@@ -102,64 +205,82 @@ worker.sync("newOrders", {
 
 ## Incremental Sync with Cursors
 
-The `state` object persists between runs. Use it to track:
+The `state` argument persists between executions and between cycles. Use it for:
 
-- **Timestamp cursors**: `lastSync` ISO date string — fetch records modified
-  after this time
-- **Page tokens**: API-provided cursor for resuming pagination
-- **Offset counters**: For APIs that use offset-based pagination
+- **Timestamp cursors** (`lastSync` as ISO string) for "modified after" queries
+- **Page tokens** from the upstream API
+- **Offset counters** for offset/limit pagination
 
 ```typescript
-execute: async ({ state }) => {
+execute: async (state) => {
   const cursor = state?.cursor ?? null;
+  await api.wait();
   const response = await fetch(
     `https://api.example.com/records?cursor=${cursor ?? ""}&limit=100`
   );
   const data = await response.json();
 
   return {
-    changes: data.results.map(transformRecord),
-    hasMore: data.hasMore,
-    nextState: {
-      ...state,
-      cursor: data.nextCursor,
-    },
+    changes: data.results.map(toUpsert),
+    hasMore: Boolean(data.nextCursor),
+    nextState: data.nextCursor ? { cursor: data.nextCursor } : undefined,
   };
 }
 ```
 
+**Eventual consistency tip**: For APIs that aren't strictly ordered, keep the
+timestamp cursor slightly behind "now" so recently written records aren't
+skipped:
+
+```typescript
+const bufferedNow = new Date(Date.now() - 15_000).toISOString();
+const latestReturned = records.at(-1)?.updatedAt;
+const cursor = latestReturned && latestReturned < bufferedNow
+  ? latestReturned
+  : bufferedNow;
+
+return {
+  changes: records.map(toUpsert),
+  hasMore: false,
+  nextState: { cursor },
+};
+```
+
 **Important**: Deploying does NOT reset sync state. The sync resumes from its
-last cursor position. To restart from scratch:
+last cursor. To restart:
 
 ```bash
 ntn workers sync state reset <syncKey>
+```
+
+To inspect the current state before deciding:
+
+```bash
+ntn workers sync state get <syncKey>
 ```
 
 ---
 
 ## Batch Pagination
 
-For APIs that return large result sets, paginate within a single sync run using
-`hasMore` and `nextState`. The platform calls `execute` again with the updated
-state.
+For large result sets, paginate within a single sync cycle using `hasMore`
+and `nextState`. The runtime calls `execute` again with the new state.
 
-Keep batches around 100 records to stay within the timeout window.
+Keep batches around 100 records to stay within the timeout.
 
 ```typescript
-execute: async ({ state }) => {
+execute: async (state) => {
   const page = state?.page ?? 1;
-  const response = await fetch(
-    `https://api.example.com/data?page=${page}&per_page=100`
-  );
-  const data = await response.json();
-
+  await api.wait();
+  const { items, hasMore } = await fetchPage(page, 100);
   return {
-    changes: data.items.map(item => ({
-      id: item.id,
+    changes: items.map((item) => ({
+      type: "upsert" as const,
+      key: item.id,
       properties: { /* ... */ },
     })),
-    hasMore: data.totalPages > page,
-    nextState: { ...state, page: page + 1 },
+    hasMore,
+    nextState: hasMore ? { page: page + 1 } : undefined,
   };
 }
 ```
@@ -168,84 +289,259 @@ execute: async ({ state }) => {
 
 ## Backfill + Delta Pattern
 
-Notion recommends this for production use: pair a manual full-refresh sync with
-a frequent incremental sync.
+Notion's recommended production pattern: pair a manual replace-mode backfill
+with a frequent incremental delta, both targeting the same database.
 
-**Full backfill** (manual trigger, replace mode):
-```typescript
-worker.sync("fullBackfill", {
-  title: "Full Data Backfill",
-  description: "Complete data refresh — run manually",
-  schedule: "manual",
-  mode: "replace",
-  // ...
-});
-```
+The delta keeps the data fresh; the backfill catches anything the delta misses
+(deletes the upstream API didn't surface, schema additions, drift after bug
+fixes).
 
-**Incremental delta** (frequent, incremental mode):
 ```typescript
-worker.sync("deltaSync", {
-  title: "Delta Sync",
-  description: "Catch new/changed records since last run",
-  schedule: "15m",
+// Delta: near-real-time updates
+worker.sync("ticketsDelta", {
+  database: tickets,
   mode: "incremental",
-  // ...
+  schedule: "5m",
+  execute: async (state) => {
+    await apiPacer.wait();
+    const { items, nextCursor } = await fetchTicketChanges(state?.cursor);
+    return {
+      changes: items.map((t) => ({
+        type: "upsert" as const,
+        key: t.id,
+        properties: {
+          Summary: Builder.title(t.summary),
+          "Ticket ID": Builder.richText(t.id),
+        },
+      })),
+      hasMore: Boolean(nextCursor),
+      nextState: nextCursor ? { cursor: nextCursor } : undefined,
+    };
+  },
+});
+
+// Backfill: full dataset sweep, run manually
+worker.sync("ticketsBackfill", {
+  database: tickets,
+  mode: "replace",
+  schedule: "manual",
+  execute: async (state) => {
+    const page = state?.page ?? 1;
+    await apiPacer.wait();
+    const { items, hasMore } = await fetchAllTickets(page);
+    return {
+      changes: items.map((t) => ({
+        type: "upsert" as const,
+        key: t.id,
+        properties: {
+          Summary: Builder.title(t.summary),
+          "Ticket ID": Builder.richText(t.id),
+        },
+      })),
+      hasMore,
+      nextState: hasMore ? { page: page + 1 } : undefined,
+    };
+  },
 });
 ```
 
-Run the backfill manually when you need a clean slate:
+To run a backfill:
+
 ```bash
-ntn workers sync trigger fullBackfill
+ntn workers sync state reset ticketsBackfill
+ntn workers sync trigger ticketsBackfill
 ```
 
-The delta sync handles everything in between.
+If both syncs hit the same upstream API, give them the same pacer. The runtime
+divides the rate-limit budget between concurrently executing capabilities.
 
 ---
 
-## Schema Design
+## Cross-Database Relations
 
-The sync schema defines the Notion database columns. Match these to the data
-you're pulling.
+Use `Schema.relation()` to link two managed databases declared in the same
+Worker:
 
-### Supported property types
+```typescript
+const projects = worker.database("projects", {
+  type: "managed",
+  initialTitle: "Projects",
+  primaryKeyProperty: "Project ID",
+  schema: {
+    properties: {
+      Name: Schema.title(),
+      "Project ID": Schema.richText(),
+    },
+  },
+});
 
-| Type | Notion Column Type | Value Format |
-|------|-------------------|--------------|
-| `title` | Title | String |
-| `rich_text` | Text | String |
-| `number` | Number | Number |
-| `select` | Select | String (must match an option) |
-| `multi_select` | Multi-select | Array of strings |
-| `date` | Date | ISO 8601 string |
-| `checkbox` | Checkbox | Boolean |
-| `url` | URL | String (valid URL) |
-| `email` | Email | String (valid email) |
-| `phone_number` | Phone | String |
+const tasks = worker.database("tasks", {
+  type: "managed",
+  initialTitle: "Tasks",
+  primaryKeyProperty: "Task ID",
+  schema: {
+    properties: {
+      Name: Schema.title(),
+      "Task ID": Schema.richText(),
+      Project: Schema.relation("projects", {
+        twoWay: true,
+        relatedPropertyName: "Tasks",   // adds a "Tasks" rollup on Projects
+      }),
+    },
+  },
+});
 
-### Design considerations
+worker.sync("tasksSync", {
+  database: tasks,
+  execute: async () => {
+    const items = await fetchTasks();
+    return {
+      changes: items.map((task) => ({
+        type: "upsert" as const,
+        key: task.id,
+        properties: {
+          Name: Builder.title(task.name),
+          "Task ID": Builder.richText(task.id),
+          Project: [Builder.relation(task.projectId)],   // array of references
+        },
+      })),
+      hasMore: false,
+    };
+  },
+});
+```
 
-- **Every sync needs exactly one `title` property.** This is the page name in
-  Notion.
-- **Use `id` in each change record** for upsert matching. The platform uses
-  this to update existing rows rather than creating duplicates.
-- **Select options must be pre-declared** in the schema if you know them. For
-  dynamic values, use `rich_text` instead.
-- **Keep schemas stable.** Changing the schema after initial sync may require
-  a state reset and redeployment. Plan the schema carefully before deploying.
-- **Column renames in the source** won't automatically update in the Worker
-  code — you'll get empty values or missed columns until you update the code
-  and redeploy.
+The first argument to `Schema.relation()` is the key passed to the related
+`worker.database()` (the string `"projects"`, not the JS variable name).
+
+Relation property values are arrays of `Builder.relation(primaryKey)` calls.
+Multiple relations:
+
+```typescript
+Projects: [
+  Builder.relation("project-123"),
+  Builder.relation("project-456"),
+]
+```
+
+---
+
+## Schema and Builder Reference
+
+### Database property definitions (`Schema`)
+
+```typescript
+import * as Schema from "@notionhq/workers/schema";
+
+Schema.title()                 // exactly one per database
+Schema.richText()              // plain text column
+Schema.url()
+Schema.email()
+Schema.phoneNumber()
+Schema.checkbox()
+Schema.file()
+Schema.number()                // or Schema.number("dollar") for currency format
+Schema.date()                  // or Schema.date("YYYY/MM/DD")
+Schema.select([{ name: "Open" }, { name: "Done", color: "green" }])
+Schema.multiSelect([{ name: "Bug", color: "red" }])
+Schema.status({
+  groups: [
+    { name: "To-do", options: [{ name: "Not started" }] },
+    { name: "Complete", options: [{ name: "Done", color: "green" }] },
+  ],
+})
+Schema.people()
+Schema.place()
+Schema.relation("databaseKey")
+Schema.relation("databaseKey", { twoWay: true, relatedPropertyName: "Tasks" })
+```
+
+### Property values in sync changes (`Builder`)
+
+```typescript
+import * as Builder from "@notionhq/workers/builder";
+
+Builder.title("Page name")
+Builder.richText("Some text")
+Builder.text("Same as richText")
+Builder.url("https://example.com")
+Builder.email("a@example.com")
+Builder.phoneNumber("+14155550123")
+Builder.checkbox(true)
+Builder.file("https://example.com/x.pdf", "Invoice")
+Builder.number(42)
+Builder.date("2026-05-11")                         // YYYY-MM-DD
+Builder.dateTime("2026-05-11T09:30:00Z")           // ISO 8601, optional timezone
+Builder.dateTime("2026-05-11T09:30:00Z", "Asia/Singapore")
+Builder.dateRange("2026-05-11", "2026-05-15")
+Builder.dateTimeRange("2026-05-11T09:30:00Z", "2026-05-11T10:30:00Z")
+Builder.select("Open")
+Builder.multiSelect("Bug", "Customer")
+Builder.status("Done")
+Builder.people("a@example.com", "b@example.com")
+Builder.place({ lat: 1.3521, lon: 103.8198, name: "Singapore" })
+Builder.link("Display text", "https://example.com")
+
+// Icons (for an upsert change's `icon` field)
+Builder.emojiIcon("✅")
+Builder.notionIcon("checkmark", "green")
+Builder.imageIcon("https://example.com/icon.png")
+```
+
+A change record can also carry optional fields:
+
+```typescript
+{
+  type: "upsert",
+  key: "task-123",
+  properties: { /* ... */ },
+  upstreamUpdatedAt: "2026-05-11T09:30:00Z",   // for conflict resolution between syncs
+  icon: Builder.emojiIcon("📝"),
+  pageContentMarkdown: "Imported from the upstream task tracker.",
+}
+```
+
+For the complete list of helpers, see
+https://developers.notion.com/workers/reference/schema.
+
+---
+
+## Rate Limiting with Pacers
+
+A pacer spreads outbound API calls across a time window so the Worker doesn't
+burn through the upstream rate limit immediately.
+
+```typescript
+const api = worker.pacer("api", {
+  allowedRequests: 10,
+  intervalMs: 1000,           // 10 req/sec
+});
+
+worker.sync("customersSync", {
+  database: customers,
+  execute: async (state) => {
+    await api.wait();           // blocks until a slot is available
+    const data = await fetchCustomers(state?.cursor);
+    // ...
+  },
+});
+```
+
+When multiple capabilities share a pacer, the platform divides the budget
+across concurrently executing capabilities. Use the same pacer for delta and
+backfill syncs that hit the same upstream API.
 
 ---
 
 ## Error Handling
 
-Never throw raw errors. Return structured responses so the platform can log
-and report correctly.
+Don't throw raw errors from sync `execute`. Return structured results so the
+platform can log correctly and your state is preserved for the next retry.
 
 ```typescript
-execute: async ({ state }) => {
+execute: async (state) => {
   try {
+    await api.wait();
     const response = await fetch("https://api.example.com/data", {
       headers: { Authorization: `Bearer ${process.env.API_KEY}` },
     });
@@ -254,14 +550,14 @@ execute: async ({ state }) => {
       return {
         changes: [],
         hasMore: false,
-        nextState: state,  // Preserve state so next run can retry
+        nextState: state,                       // preserve state for retry
         error: `API returned ${response.status}: ${response.statusText}`,
       };
     }
 
     const data = await response.json();
     return {
-      changes: data.map(transformRecord),
+      changes: data.map(toUpsert),
       hasMore: false,
       nextState: { ...state, lastSync: new Date().toISOString() },
     };
@@ -270,7 +566,7 @@ execute: async ({ state }) => {
       changes: [],
       hasMore: false,
       nextState: state,
-      error: `Fetch failed: ${err.message}`,
+      error: `Fetch failed: ${(err as Error).message}`,
     };
   }
 }
@@ -281,12 +577,14 @@ execute: async ({ state }) => {
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |
-|---------|-------------|-----|
-| Sync stuck in INITIALIZING | First run hasn't completed or timed out | Check logs: `ntn workers runs logs <runId>` |
+|---------|--------------|-----|
+| Sync runs but no rows appear | Data-fetch returning empty, or `key` doesn't match `primaryKeyProperty` | Run `ntn workers sync trigger <key> --preview` to inspect what `execute` returns |
+| Rows are duplicated | Inconsistent `key` between cycles | Ensure `key` is the stable upstream ID, not a value that changes between runs |
+| Stale rows aren't deleted (replace mode) | Sync errored partway through, so mark-and-sweep didn't run | Fix the error so the cycle reaches `hasMore: false` |
+| Sync stuck in INITIALIZING | First run hasn't completed | Check logs: `ntn workers runs list` then `ntn workers runs logs <runId>` |
 | Sync in ERROR state | 3+ consecutive failures | Check logs, fix the issue, redeploy. State is preserved. |
-| Duplicate rows appearing | Missing or inconsistent `id` in change records | Ensure every record has a stable, unique `id` from the source |
-| Empty values in some columns | Schema mismatch between code and source data | Verify property names match exactly (case-sensitive) |
-| Timeout errors | Too much data in a single execution | Reduce batch size, use `hasMore` pagination |
-| OAuth token expired | Refresh flow failed | Re-run `ntn workers oauth start <oauthName>` |
-| Data not updating after redeploy | Sync resumes from last cursor, not from scratch | Run `ntn workers sync state reset <key>` if you need a fresh start |
-| Sync paused unexpectedly | Manually disabled or hit error threshold | Check `ntn workers capabilities list` and re-enable if needed |
+| Empty values in some columns | Property name mismatch between code and schema | Property names are case-sensitive; check exact match |
+| Timeout errors | Too much data in a single execution | Reduce batch size, paginate with `hasMore` / `nextState` |
+| OAuth token expired | Refresh flow failed | Re-run `ntn workers oauth start <capabilityKey>` |
+| Data didn't update after redeploy | Sync resumed from old cursor | Run `ntn workers sync state reset <syncKey>` if you need a fresh start |
+| Sync paused unexpectedly | Manually disabled or hit error threshold | `ntn workers capabilities list`, then `enable <key>` if needed |
