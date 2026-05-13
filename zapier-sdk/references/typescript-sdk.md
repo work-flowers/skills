@@ -16,6 +16,8 @@ Full API reference for `@zapier/zapier-sdk` v0.40.1.
 8. [Client Credentials](#client-credentials)
 9. [Pagination](#pagination)
 10. [App Proxy Pattern](#app-proxy-pattern)
+11. [Triggers (Experimental, closed beta)](#triggers-experimental)
+12. [Parameter Naming (v0.40.1)](#parameter-naming-v0401)
 
 ---
 
@@ -29,13 +31,19 @@ const zapier = createZapierSdk();
 
 // Client credentials (for servers/CI)
 const zapier = createZapierSdk({
-  clientId: process.env.ZAPIER_CLIENT_ID,
-  clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+  credentials: {
+    clientId: process.env.ZAPIER_CLIENT_ID,
+    clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+  },
 });
 
-// Direct token
-const zapier = createZapierSdk({ token: "your-zapier-token" });
+// Direct token (partner OAuth / internal use)
+const zapier = createZapierSdk({
+  credentials: "your-zapier-token",
+});
 ```
+
+The top-level `clientId` / `clientSecret` / `token` props from earlier docs are deprecated — wrap them in `credentials` in all new code.
 
 ---
 
@@ -60,7 +68,7 @@ List available apps with optional filtering.
 ```typescript
 const { data: apps } = await zapier.listApps({
   search: "google sheets",  // Search by name
-  apps: ["slack", "gmail"], // Filter to specific apps
+  apps: ["slack", "gmail"], // Filter to specific apps by slug
   pageSize: 20,
   maxItems: 50,
   cursor: "...",
@@ -120,12 +128,12 @@ const { data: result } = await zapier.runAction({
 });
 ```
 
-### getInputFieldsSchema({ app, actionType, action, connection?, inputs? })
+### getActionInputFieldsSchema({ app, actionType, action, connection?, inputs? })
 
 Returns JSON Schema describing input parameters. Useful for agent tool definitions.
 
 ```typescript
-const { data: schema } = await zapier.getInputFieldsSchema({
+const { data: schema } = await zapier.getActionInputFieldsSchema({
   app: "slack",
   actionType: "write",
   action: "channel_message",
@@ -133,12 +141,12 @@ const { data: schema } = await zapier.getInputFieldsSchema({
 });
 ```
 
-### listInputFields({ app, actionType, action, connection?, inputs?, ... })
+### listActionInputFields({ app, actionType, action, connection?, inputs?, ... })
 
 Get required input fields. Pass existing `inputs` to reveal dynamic fields.
 
 ```typescript
-const { data: fields } = await zapier.listInputFields({
+const { data: fields } = await zapier.listActionInputFields({
   app: "google-sheets",
   actionType: "write",
   action: "add_row",
@@ -147,12 +155,12 @@ const { data: fields } = await zapier.listInputFields({
 });
 ```
 
-### listInputFieldChoices({ app, actionType, action, inputField, connection?, inputs?, ... })
+### listActionInputFieldChoices({ app, actionType, action, inputField, connection?, inputs?, ... })
 
 Fetch dynamic dropdown options for a specific field.
 
 ```typescript
-const { data: choices } = await zapier.listInputFieldChoices({
+const { data: choices } = await zapier.listActionInputFieldChoices({
   app: "slack",
   actionType: "write",
   action: "channel_message",
@@ -167,17 +175,17 @@ const { data: choices } = await zapier.listInputFieldChoices({
 
 ### listConnections(options?)
 
-List available connections with filtering.
+List available connections with filtering. Non-expired connections are returned by default.
 
 ```typescript
 const { data: connections } = await zapier.listConnections({
   app: "slack",
   owner: "me",           // "me" or specific owner
-  isExpired: false,
   includeShared: true,
   search: "production",
   title: "My Slack",
   pageSize: 20,
+  // expired: true,      // pass to filter to expired-only
 });
 ```
 
@@ -189,7 +197,6 @@ Returns the first matching connection. Throws if none found.
 const { data: conn } = await zapier.findFirstConnection({
   app: "slack",
   owner: "me",
-  isExpired: false,
 });
 ```
 
@@ -216,28 +223,34 @@ const { data: conn } = await zapier.getConnection({ connection: 12345 });
 
 ## HTTP Requests
 
-### fetch(url, options?)
+### fetch(url, init?)
 
-Make authenticated HTTP requests to any API through Zapier's infrastructure. The `connection` parameter automatically injects stored credentials.
+Make authenticated HTTP requests to any API through Zapier's infrastructure. Mirrors the native `fetch(url, init?)` signature with Zapier-specific options. The `connection` option automatically injects stored credentials.
 
 ```typescript
 const response = await zapier.fetch("https://slack.com/api/users.list", {
   method: "GET",
-  connectionId: slackConnectionId,
+  connection: slackConnectionId,
 });
 
 // POST with body
 const response = await zapier.fetch("https://api.example.com/data", {
   method: "POST",
-  connectionId: connectionId,
+  connection: connectionId,
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ key: "value" }),
 });
 ```
 
-Supports async callbacks via `callbackUrl` for long-running operations.
+Zapier-specific `init` options:
 
-**Important:** `fetch` calls are NOT governed by org-level app restrictions (unlike pre-built actions). Direct API governance is on the roadmap.
+| Option | Description |
+|--------|-------------|
+| `connection` | Connection alias or ID. Strings matching a key in the `connections` map (Code-step context) are resolved against it; otherwise the value is used as a connection ID directly. |
+| `callbackUrl` | URL to POST the async response to. Makes the request async. Useful for long-running calls. |
+| `maxTime` | Max seconds to wait for a response. Honoured on a best-effort basis; the server may silently enforce a lower ceiling. |
+
+**Important:** `fetch` calls are NOT governed by org-level app restrictions (unlike pre-built actions). Direct API governance is on the roadmap. For gated actions, see the approval flow in `SKILL.md`.
 
 ---
 
@@ -258,9 +271,10 @@ await zapier.createTableRecords({ table: table.id, records: [...] });
 // Query records
 const { data: records } = await zapier.listTableRecords({
   table: table.id,
-  filters: { status: "active" },
-  sort: "created_at",
-  direction: "desc",
+  filters: [
+    { fieldKey: "Status", operator: "equals", value: "active" },
+  ],
+  sort: { fieldKey: "created_at", direction: "desc" },
 });
 ```
 
@@ -277,12 +291,14 @@ For server/CI environments where browser login isn't possible.
 
 // Use in code
 const zapier = createZapierSdk({
-  clientId: process.env.ZAPIER_CLIENT_ID,
-  clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+  credentials: {
+    clientId: process.env.ZAPIER_CLIENT_ID,
+    clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+  },
 });
 ```
 
-SDK methods:
+SDK methods for managing credentials:
 
 ```typescript
 await zapier.createClientCredentials({ name: "my-app", allowedScopes: [...] });
@@ -320,7 +336,7 @@ Pagination parameters: `pageSize` (items per page), `maxItems` (total limit), `c
 Bind a connection to an app once, then call actions with cleaner syntax:
 
 ```typescript
-const slack = zapier.apps.slack({ connectionId: conn.id });
+const slack = zapier.apps.slack({ connection: conn.id });
 
 // These are equivalent:
 await slack.write.channel_message({ inputs: { channel: "C0123", text: "Hi" } });
@@ -332,6 +348,58 @@ await zapier.runAction({
 ```
 
 The proxy pattern is cleaner for multiple calls to the same app. Use `runAction` when you need more control or are working with a single call.
+
+---
+
+## Triggers (Experimental)
+
+> ⚠️ **Closed beta.** Import from `"@zapier/zapier-sdk/experimental"`. Methods and behaviour may change. [Request access here](https://npsup.zapier.app/contact-us?product=Zapier%20SDK).
+
+Subscribe to real-time events from connected apps in code — no polling, no custom webhook infrastructure.
+
+```typescript
+import { createZapierSdk } from "@zapier/zapier-sdk";
+import {} from "@zapier/zapier-sdk/experimental";  // augments the SDK with trigger methods
+
+const zapier = createZapierSdk();
+
+// Idempotent create-or-get by name (recommended for production)
+const { data: inbox } = await zapier.ensureTriggerInbox({
+  name: "new-github-issues",
+  app: "github",
+  action: "new_issue",
+  connection: ghConnId,
+  // notificationUrl: "https://your-app/webhook",   // optional async push
+});
+
+// Continuously consume messages with backoff polling
+await zapier.watchTriggerInbox({
+  inbox: inbox.id,
+  onMessage: async (msg) => {
+    console.log("got issue:", msg.payload);
+  },
+  concurrency: 5,
+  releaseOnError: true,
+});
+```
+
+Method index:
+
+| Method | Purpose |
+|--------|---------|
+| `createTriggerInbox` | Always create a new inbox (auto-generated name) |
+| `ensureTriggerInbox` | Idempotent get-or-create by name |
+| `listTriggerInboxes` / `getTriggerInbox` | Discovery |
+| `pauseTriggerInbox` / `resumeTriggerInbox` | Lifecycle |
+| `updateTriggerInbox` / `deleteTriggerInbox` | Mutate / tear down |
+| `leaseTriggerInboxMessages` | Lease up to N messages with a lease ID |
+| `ackTriggerInboxMessages` | Acknowledge (remove from inbox) |
+| `releaseTriggerInboxMessages` | Release back to available pool |
+| `drainTriggerInbox` | One-shot: process all currently-available messages |
+| `watchTriggerInbox` | Long-running: drain + poll with backoff |
+| `getTriggerInputFieldsSchema` / `listTriggerInputFields` / `listTriggerInputFieldChoices` | Trigger input discovery |
+
+Useful signals: `ZapierReleaseTriggerMessageSignal` (throw inside `onMessage` to release without acking), `ZapierAbortDrainSignal` (throw to stop the drain after the current batch). Pass an `AbortSignal` via `signal` for clean shutdown.
 
 ---
 

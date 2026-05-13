@@ -28,11 +28,13 @@ npx zapier-sdk create-table-records TABLE_ID '[
 
 ### Query records
 ```bash
-npx zapier-sdk list-table-records TABLE_ID "Status" \
-  --filters '{"Status": "Active"}' \
-  --sort "Revenue" --direction desc \
+npx zapier-sdk list-table-records TABLE_ID \
+  --filters '[{"fieldKey":"Status","operator":"equals","value":"Active"}]' \
+  --sort '{"fieldKey":"Revenue","direction":"desc"}' \
   --json
 ```
+
+`--filters` is an **array** of `{fieldKey, operator, value}` conditions. `--sort` is a single `{fieldKey, direction}` object. The older `--filters '{"Status":"Active"}' --sort "Revenue" --direction desc` shape is no longer supported.
 
 ### Update records
 ```bash
@@ -80,10 +82,10 @@ await zapier.createTableRecords({
 // Query records with filters and sorting
 const { data: records } = await zapier.listTableRecords({
   table: table.id,
-  fieldKey: "Status",
-  filters: { Status: "Active" },
-  sort: "Revenue",
-  direction: "desc",
+  filters: [
+    { fieldKey: "Status", operator: "equals", value: "Active" },
+  ],
+  sort: { fieldKey: "Revenue", direction: "desc" },
 });
 
 // Update records

@@ -60,13 +60,20 @@ Browser-based login won't work here. Use **client credentials** instead:
    npx zapier-sdk list-connections --owner me --json
    ```
 
-For the TypeScript SDK, pass them at initialisation:
+For the TypeScript SDK, pass them at initialisation under a `credentials` object:
 ```typescript
 const zapier = createZapierSdk({
-  clientId: process.env.ZAPIER_CLIENT_ID,
-  clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+  credentials: {
+    clientId: process.env.ZAPIER_CLIENT_ID,
+    clientSecret: process.env.ZAPIER_CLIENT_SECRET,
+  },
 });
+
+// Or pass a token directly:
+const zapier = createZapierSdk({ credentials: process.env.ZAPIER_TOKEN });
 ```
+
+The old top-level `clientId`/`clientSecret`/`token` props are deprecated — use `credentials` in new code.
 
 ## CLI Workflow — The Core Loop
 
@@ -82,17 +89,21 @@ This returns app metadata including the `slug` (e.g. `slack`, `google-sheets`). 
 
 ### 2. Find Your Connection
 
+The app slug is a **positional argument**, not a flag:
+
 ```bash
-npx zapier-sdk list-connections --app slack --owner me --json
+npx zapier-sdk list-connections slack --owner me --json
 ```
 
 Or to get the first non-expired match directly:
 
 ```bash
-npx zapier-sdk find-first-connection --app slack --owner me --is-expired false --json
+npx zapier-sdk find-first-connection slack --owner me --json
 ```
 
-Each connection has a numeric `id` — you'll pass this as `--connection-id` (or `--connection`) when running actions.
+Non-expired connections are returned by default. Pass `--expired` to filter to expired-only (useful for spotting connections that need re-auth).
+
+Each connection has a numeric `id` — you'll pass this as `--connection` (or the older `--connection-id`) when running actions.
 
 ### 3. Discover Actions
 
@@ -117,15 +128,15 @@ Action types:
 Before running an action, check what inputs it needs:
 
 ```bash
-npx zapier-sdk list-input-fields slack write channel_message \
-  --connection-id 12345 --json
+npx zapier-sdk list-action-input-fields slack write channel_message \
+  --connection 12345 --json
 ```
 
 Some fields are **dynamic** — they only appear after you provide earlier fields. For example, Google Sheets column fields only appear once you specify the spreadsheet:
 
 ```bash
-npx zapier-sdk list-input-fields google-sheets write add_row \
-  --connection-id 12345 \
+npx zapier-sdk list-action-input-fields google-sheets write add_row \
+  --connection 12345 \
   --inputs '{"spreadsheet": "abc123", "worksheet": "0"}' \
   --json
 ```
@@ -133,22 +144,24 @@ npx zapier-sdk list-input-fields google-sheets write add_row \
 For dynamic dropdowns (e.g. choosing a channel from a list):
 
 ```bash
-npx zapier-sdk list-input-field-choices slack write channel_message channel \
-  --connection-id 12345 --json
+npx zapier-sdk list-action-input-field-choices slack write channel_message channel \
+  --connection 12345 --json
 ```
 
 For JSON Schema output (useful for agent tool definitions):
 
 ```bash
-npx zapier-sdk get-input-fields-schema slack write channel_message \
-  --connection-id 12345 --json
+npx zapier-sdk get-action-input-fields-schema slack write channel_message \
+  --connection 12345 --json
 ```
+
+Note: the actual CLI commands are `list-action-input-fields`, `list-action-input-field-choices`, and `get-action-input-fields-schema` (with the `action-` prefix). The shorter names without `action-` do not exist.
 
 ### 5. Run the Action
 
 ```bash
 npx zapier-sdk run-action slack write channel_message \
-  --connection-id 12345 \
+  --connection 12345 \
   --inputs '{"channel": "C0123ABCD", "text": "Hello from the SDK!"}' \
   --json
 ```
@@ -159,38 +172,38 @@ When the pre-built actions don't cover your use case, use `curl` to make authent
 
 ```bash
 npx zapier-sdk curl "https://slack.com/api/users.list" \
-  --connection-id 12345
+  --connection 12345
 ```
 
 POST with JSON body:
 
 ```bash
 npx zapier-sdk curl "https://api.example.com/endpoint" \
-  --connection-id 12345 \
+  --connection 12345 \
   -X POST \
   --json '{"key": "value"}'
 ```
 
 The connection ID tells Zapier which stored credentials to inject (OAuth tokens, API keys, etc.). No manual header management needed.
 
-**Governance note:** Pre-built actions respect your org's app/action restrictions. Direct API calls via `curl`/`fetch` are not yet governed — direct API governance is on the roadmap.
+**Governance note:** Pre-built actions respect your org's app/action restrictions. Direct API calls via `curl`/`fetch` are not yet governed — direct API governance is on the roadmap. See the "Approval flow and governance" section below for the related approval mechanism.
 
 ## Scripting with the CLI
 
 All commands support `--json` for piping. Common pattern — extract a connection ID and use it:
 
 ```bash
-CONNECTION_ID=$(npx zapier-sdk find-first-connection --app google-sheets --owner me --json 2>/dev/null | jq -r '.data.id')
+CONNECTION_ID=$(npx zapier-sdk find-first-connection google-sheets --owner me --json 2>/dev/null | jq -r '.data.id')
 
 npx zapier-sdk run-action google-sheets write create_spreadsheet \
-  --connection-id $CONNECTION_ID \
+  --connection $CONNECTION_ID \
   --inputs '{"title": "My Sheet", "headers": ["Name", "Email"]}' \
   --json
 ```
 
 ## TypeScript SDK — For Production Code
 
-When you need something repeatable, embedded, or in production, use the TypeScript SDK. See `references/typescript-sdk.md` for the full API reference.
+When you need something repeatable, embedded, or in production, use the TypeScript SDK. See `typescript-sdk.md` for the full API reference.
 
 Quick example:
 
@@ -199,13 +212,13 @@ import { createZapierSdk } from "@zapier/zapier-sdk";
 
 const zapier = createZapierSdk();
 
-// Find connection
+// Find connection (non-expired by default)
 const { data: conn } = await zapier.findFirstConnection({
-  app: "slack", owner: "me", isExpired: false,
+  app: "slack", owner: "me",
 });
 
 // Bind connection to app
-const slack = zapier.apps.slack({ connectionId: conn.id });
+const slack = zapier.apps.slack({ connection: conn.id });
 
 // Run action
 const { data: result } = await slack.write.channel_message({
@@ -283,14 +296,14 @@ When the pre-built actions don't cover the endpoint, call the API directly. Zapi
 ```javascript
 const res = await zapier.fetch("https://api.notion.com/v1/databases/DB_ID/query", {
   method: "POST",
-  connectionId: connections["notion"],
+  connection: connections["notion"],
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ page_size: 50 }),
 });
 const result = await res.json();
 ```
 
-`zapier.fetch` is the escape hatch for the long tail of endpoints that don't have a pre-built action.
+`zapier.fetch` also accepts `callbackUrl` (for async responses to long-running operations) and `maxTime` (max seconds to wait for a response, honoured on a best-effort basis). It's the escape hatch for the long tail of endpoints that don't have a pre-built action.
 
 ### Discovering app keys, action keys, and input fields
 
@@ -299,11 +312,11 @@ The Code step UI doesn't tell you what to type. To find the right `appKey`, `act
 ```bash
 npx zapier-sdk list-connections --owner me --json     # confirm app keys
 npx zapier-sdk list-actions notion --json             # find action keys
-npx zapier-sdk list-input-fields notion write create_database_item \
-  --connection-id 12345 --json                        # find input field names
+npx zapier-sdk list-action-input-fields notion write create_database_item \
+  --connection 12345 --json                            # find input field names
 ```
 
-You don't pass the `--connection-id` value into the Code step — it's only needed locally so the CLI can resolve dynamic fields. In the Code step, the value comes from `connections["notion"]`.
+You don't pass the `--connection` value into the Code step — it's only needed locally so the CLI can resolve dynamic fields. In the Code step, the value comes from `connections["notion"]`.
 
 ### Limits and gotchas
 
@@ -335,7 +348,7 @@ Reach for the external SDK / CLI when the work is scheduled, long-running, agent
 
 ## Zapier Tables
 
-The SDK/CLI can also work with Zapier Tables (structured data storage). See `references/tables.md` for details.
+The SDK/CLI can also work with Zapier Tables (structured data storage). See `tables.md` for details.
 
 ## Common Patterns
 
@@ -343,26 +356,26 @@ The SDK/CLI can also work with Zapier Tables (structured data storage). See `ref
 ```bash
 # Look up your Slack user by email
 npx zapier-sdk run-action slack search user_by_email \
-  --connection-id ID --inputs '{"email": "you@example.com"}' --json
+  --connection ID --inputs '{"email": "you@example.com"}' --json
 
 # Send DM using the returned username
 npx zapier-sdk run-action slack write direct_message \
-  --connection-id ID --inputs '{"channel": "USERNAME", "text": "Hello!"}' --json
+  --connection ID --inputs '{"channel": "USERNAME", "text": "Hello!"}' --json
 ```
 
 **Create a Google Sheet and add rows:**
 ```bash
 # Create sheet
 npx zapier-sdk run-action google-sheets write create_spreadsheet \
-  --connection-id ID --inputs '{"title": "Report", "headers": ["Name", "Score"]}' --json
+  --connection ID --inputs '{"title": "Report", "headers": ["Name", "Score"]}' --json
 
 # Inspect dynamic column fields
-npx zapier-sdk list-input-fields google-sheets write add_row \
-  --connection-id ID --inputs '{"spreadsheet": "SHEET_ID", "worksheet": "0"}' --json
+npx zapier-sdk list-action-input-fields google-sheets write add_row \
+  --connection ID --inputs '{"spreadsheet": "SHEET_ID", "worksheet": "0"}' --json
 
 # Add a row (use the dynamic column keys from above, e.g. COL$A, COL$B)
 npx zapier-sdk run-action google-sheets write add_row \
-  --connection-id ID \
+  --connection ID \
   --inputs '{"spreadsheet": "SHEET_ID", "worksheet": "0", "COL$A": "Alice", "COL$B": "95"}' \
   --json
 ```
@@ -370,7 +383,7 @@ npx zapier-sdk run-action google-sheets write add_row \
 **Search then act pattern:**
 ```bash
 # Find a contact in HubSpot
-npx zapier-sdk run-action hubspot search contact --connection-id ID \
+npx zapier-sdk run-action hubspot search contact --connection ID \
   --inputs '{"email": "alice@example.com"}' --json
 
 # Use the result to update or create something elsewhere
@@ -378,16 +391,73 @@ npx zapier-sdk run-action hubspot search contact --connection-id ID \
 
 ## Gotchas and Tips
 
-- **Parameter naming:** As of v0.40.1, parameters use suffix-less names (`--app` not `--app-key`, `--connection` not `--connection-id`). The old names still work but are deprecated.
+- **Parameter naming:** As of SDK v0.40.1 / CLI v0.39.1, parameters use suffix-less names (`--app` not `--app-key`, `--connection` not `--connection-id`, `app` not `appKey` in SDK options, etc.). The old names still work but are deprecated.
+- **App identifiers are flexible.** Anywhere an `app` parameter is accepted, you can pass a slug (`slack`), implementation name (`SlackCLIAPI`), or versioned ID (`slack@1.2.3`). The slug is what you'll use 99% of the time.
+- **`--app` for connection commands is a positional, not a flag.** `find-first-connection slack --owner me`, not `find-first-connection --app slack`.
 - **Enterprise/Team plans** are off by default for the SDK — contact Zapier for opt-in.
 - **`--json` flag** is your friend — always use it when scripting or piping output.
-- **Dynamic fields** are the most common point of confusion. If an action seems to be missing expected inputs, try passing the fields you already know via `--inputs` to `list-input-fields` to reveal the dynamic ones.
+- **Dynamic fields** are the most common point of confusion. If an action seems to be missing expected inputs, try passing the fields you already know via `--inputs` to `list-action-input-fields` to reveal the dynamic ones.
 - **Connection IDs are numeric** — don't confuse them with app slugs.
 - **Timeout default is 180 seconds** for action execution. Override with `--timeout-ms`.
 - **Pagination:** Use `--page-size` and `--cursor` for large result sets. The default page size is 100.
+- **Expired connections** are filtered out by default. Pass `--expired` to filter to expired-only (useful for spotting connections that need re-auth).
+
+## Approval Flow and Governance
+
+When an org policy gates an action, the SDK can throw a `ZapierApprovalError` or, with the right flag, create an approval and wait for the user to grant it. New global CLI flags control this:
+
+- `--approval-mode disabled` (default) — throws `ZapierApprovalError` on approval-required responses without creating an approval.
+- `--approval-mode poll` — creates the approval, opens it in a browser, polls until resolved, and retries the original request.
+- `--approval-mode throw` — creates the approval and throws `ZapierApprovalError` with the approval URL so the caller can surface it (e.g. to a chat UI).
+- `--approval-timeout-ms` — timeout for polling (default 600 000 ms / 10 min).
+- `--max-approval-retries` — max sequential approval rounds per request (default 2).
+
+You can also set the `ZAPIER_APPROVAL_MODE` env var instead of passing the flag every time.
+
+Related capability flags that act as explicit opt-ins for sensitive operations:
+
+- `--can-include-shared-connections` — allow listing shared connections.
+- `--can-include-shared-tables` — allow listing shared tables.
+- `--can-delete-tables` — allow deleting tables.
+
+This is the governance answer to the existing "direct `fetch` calls aren't yet covered by org policy" caveat — approval-mode lets a server/agent run gated actions while still keeping a human in the loop.
+
+## Triggers API (Closed Beta)
+
+Real-time triggers are now available in **closed beta**. Subscribe to events from any of the 9,000+ connected apps in code — no polling, no custom webhook infrastructure.
+
+Quick shape:
+
+```typescript
+import { createZapierSdk } from "@zapier/zapier-sdk";
+import { /* trigger methods */ } from "@zapier/zapier-sdk/experimental";
+
+// 1. Create or ensure an inbox (idempotent by name)
+const { data: inbox } = await zapier.ensureTriggerInbox({
+  name: "new-github-issues",
+  app: "github",
+  action: "new_issue",
+  connection: ghConnId,
+});
+
+// 2. Drain available messages, or watch continuously
+await zapier.watchTriggerInbox({
+  inbox: inbox.id,
+  onMessage: async (msg) => { /* handle */ },
+  concurrency: 5,
+});
+```
+
+Key methods: `createTriggerInbox`, `ensureTriggerInbox` (get-or-create), `listTriggerInboxes`, `getTriggerInbox`, `pauseTriggerInbox`, `resumeTriggerInbox`, `leaseTriggerInboxMessages`, `ackTriggerInboxMessages`, `releaseTriggerInboxMessages`, `drainTriggerInbox`, `watchTriggerInbox`, `deleteTriggerInbox`. All also available as CLI subcommands (e.g. `npx zapier-sdk watch-trigger-inbox <inbox>`).
+
+**Important caveats:**
+- Closed beta — methods and behaviour may change.
+- Import experimental SDK methods from `"@zapier/zapier-sdk/experimental"`.
+- CLI subcommands run via the `zapier-sdk-experimental` bin or by passing `--experimental` to `zapier-sdk`.
+- [Request access here](https://npsup.zapier.app/contact-us?product=Zapier%20SDK).
 
 ## Reference Files
 
-- `references/typescript-sdk.md` — Full TypeScript SDK API reference (methods, types, pagination, app proxy pattern)
-- `references/cli-reference.md` — Complete CLI command reference with all flags
-- `references/tables.md` — Working with Zapier Tables (create, query, update records)
+- `typescript-sdk.md` — Full TypeScript SDK API reference (methods, types, pagination, app proxy pattern)
+- `cli-reference.md` — Complete CLI command reference with all flags
+- `tables.md` — Working with Zapier Tables (create, query, update records)

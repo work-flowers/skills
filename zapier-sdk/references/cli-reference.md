@@ -9,12 +9,30 @@ Available on all commands:
 | Flag | Description |
 |------|-------------|
 | `--json` | Output as JSON (essential for scripting) |
-| `--credentials` | Auth credentials string |
-| `--credentials-client-id` | Client ID for auth |
-| `--credentials-client-secret` | Client secret for auth |
-| `--max-network-retries` | Max retry count |
-| `--max-network-retry-delay-ms` | Max retry delay |
+| `--credentials` | Auth token (single string) |
+| `--credentials-client-id` | OAuth client ID |
+| `--credentials-client-secret` | OAuth client secret |
+| `--credentials-base-url` | Override auth base URL |
+| `--base-url` | Override Zapier API base URL |
+| `--tracking-base-url` | Override Zapier tracking endpoints |
+| `--max-network-retries` | Max retries for rate-limited requests (default 3) |
+| `--max-network-retry-delay-ms` | Max delay in ms between retries (default 60000) |
+| `--approval-mode` | `disabled` (default), `poll`, or `throw` — see Approval Flow below |
+| `--approval-timeout-ms` | Approval polling timeout in ms (default 600000 / 10 min) |
+| `--max-approval-retries` | Max sequential approval rounds per request (default 2) |
+| `--can-include-shared-connections` | Allow listing shared connections |
+| `--can-include-shared-tables` | Allow listing shared tables |
+| `--can-delete-tables` | Allow deleting tables |
 | `--debug` | Enable debug output |
+
+### Approval Flow
+
+When org policy gates an action, the CLI's default behaviour is to throw `ZapierApprovalError` rather than create an approval. Override with:
+
+- `--approval-mode poll` — create the approval, open it in a browser, poll until resolved, then retry the original request.
+- `--approval-mode throw` — create the approval and throw `ZapierApprovalError` with the approval URL so the caller can surface it (e.g. in a chat UI).
+
+You can also set the `ZAPIER_APPROVAL_MODE` env var.
 
 ---
 
@@ -87,44 +105,48 @@ npx zapier-sdk run-action <app> <action-type> <action> \
   [--json]
 ```
 
-### list-input-fields
+### list-action-input-fields
 Get required inputs for an action. Pass `--inputs` with known values to reveal dynamic fields.
 ```bash
-npx zapier-sdk list-input-fields <app> <action-type> <action> \
+npx zapier-sdk list-action-input-fields <app> <action-type> <action> \
   [--connection ID] \
   [--inputs '{"key": "value"}'] \
   [--page-size N] [--max-items N] [--cursor X] \
   [--json]
 ```
 
-### get-input-fields-schema
+### get-action-input-fields-schema
 Get JSON Schema for action inputs (useful for agent tool definitions).
 ```bash
-npx zapier-sdk get-input-fields-schema <app> <action-type> <action> \
+npx zapier-sdk get-action-input-fields-schema <app> <action-type> <action> \
   [--connection ID] \
   [--inputs '{"key": "value"}'] \
   [--json]
 ```
 
-### list-input-field-choices
+### list-action-input-field-choices
 Get dynamic dropdown options for a specific field.
 ```bash
-npx zapier-sdk list-input-field-choices <app> <action-type> <action> <input-field> \
+npx zapier-sdk list-action-input-field-choices <app> <action-type> <action> <input-field> \
   [--connection ID] \
   [--inputs '{"key": "value"}'] \
   [--page N] [--page-size N] [--max-items N] [--cursor X] \
   [--json]
 ```
 
+Note: the input-field commands all carry the `action-` prefix. The shorter names (`list-input-fields`, `get-input-fields-schema`, `list-input-field-choices`) do not exist as CLI commands.
+
 ---
 
 ## Connection Commands
 
+In all three of `list-connections`, `find-first-connection`, and `find-unique-connection`, `[app]` is an **optional positional argument**, not a flag. Non-expired connections are returned by default; pass `--expired` to filter to expired-only.
+
 ### list-connections
 List available connections.
 ```bash
-npx zapier-sdk list-connections \
-  [--app slug] [--owner me] [--is-expired false] \
+npx zapier-sdk list-connections [app] \
+  [--owner me] [--expired] \
   [--search "text"] [--title "name"] \
   [--connections id1,id2] [--account X] \
   [--include-shared] \
@@ -135,8 +157,8 @@ npx zapier-sdk list-connections \
 ### find-first-connection
 Get the first matching connection.
 ```bash
-npx zapier-sdk find-first-connection \
-  [--app slug] [--owner me] [--is-expired false] \
+npx zapier-sdk find-first-connection [app] \
+  [--owner me] [--expired] \
   [--search "text"] [--title "name"] \
   [--account X] [--include-shared] \
   [--json]
@@ -145,8 +167,8 @@ npx zapier-sdk find-first-connection \
 ### find-unique-connection
 Get exactly one matching connection (errors if zero or multiple).
 ```bash
-npx zapier-sdk find-unique-connection \
-  [--app slug] [--owner me] [--is-expired false] \
+npx zapier-sdk find-unique-connection [app] \
+  [--owner me] [--expired] \
   [--json]
 ```
 
@@ -160,22 +182,26 @@ npx zapier-sdk get-connection [--connection ID] [--json]
 
 ## HTTP / curl Command
 
-Make authenticated HTTP requests directly. Connection ID auto-injects credentials.
+Make authenticated HTTP requests directly. The `--connection` flag auto-injects stored credentials.
 
 ```bash
 npx zapier-sdk curl <url> \
   [--connection ID] \
-  [-X METHOD] \
-  [-H "Header: value"] \
+  [--request METHOD] [-X METHOD] \
+  [--header "Header: value"] [-H "Header: value"] \
   [--json '{"body": "data"}'] \
-  [--data "raw-data"] \
-  [--data-raw "data"] \
-  [--data-binary @file] \
-  [-F "field=value"] \
+  [--data raw] [--data-raw raw] [--data-binary @file] [--data-urlencode "k=v"] \
+  [--form "field=value"] [--form-string "field=val"] \
   [--get] [--head] \
-  [-L] [-i] [-o file] [-v] [-s] [-f] \
+  [--location] [-L] \
+  [--include] [-i] \
+  [--output file] [-o file] [--remote-name] \
+  [--verbose] [-v] [--silent] [-s] [--show-error] \
+  [--fail] [-f] [--fail-with-body] \
+  [--write-out '%{http_code}'] \
   [--max-time seconds] \
-  [--user user:pass]
+  [--user user:pass] \
+  [--compressed]
 ```
 
 Supports familiar curl-style flags. The `--connection` flag is the key differentiator — it handles OAuth token injection automatically.
@@ -211,16 +237,20 @@ npx zapier-sdk delete-table-fields <table> <fields>
 ```bash
 npx zapier-sdk create-table-records <table> <records-json> [--key-mode names|ids]
 npx zapier-sdk get-table-record <table> <record> [--key-mode names|ids] [--json]
-npx zapier-sdk list-table-records <table> <field-key> [--filters X] [--sort X] [--direction asc|desc] [--key-mode names|ids] [--json]
+npx zapier-sdk list-table-records <table> \
+  [--filters '[{"fieldKey":"f1","operator":"equals","value":"active"}]'] \
+  [--sort '{"fieldKey":"f1","direction":"desc"}'] \
+  [--key-mode names|ids] \
+  [--page-size N] [--max-items N] [--cursor X] [--json]
 npx zapier-sdk update-table-records <table> <records-json> [--key-mode names|ids]
 npx zapier-sdk delete-table-records <table> <records>
 ```
 
-Max 100 records per create/update call. `--key-mode` controls whether field references use human-readable names (default) or internal IDs (f1, f2, etc.).
+Max 100 records per create/update call. `--key-mode` controls whether field references use human-readable names (default) or internal IDs (f1, f2, etc.). Note: `--filters` is now an **array** of `{fieldKey, operator, value}` conditions, and `--sort` is a single `{fieldKey, direction}` object — the older `--filters '{"Status":"Active"}' --sort "field" --direction desc` shape is no longer supported.
 
 ---
 
-## Development Commands
+## Utility Commands
 
 ### add
 Register apps and generate TypeScript types.
@@ -283,3 +313,56 @@ npx zapier-sdk list-client-credentials [--page-size N] [--max-items N] [--cursor
 ```bash
 npx zapier-sdk delete-client-credentials <client-id>
 ```
+
+---
+
+## Trigger Commands (Experimental, Closed Beta)
+
+> ⚠️ Closed beta. Run via the `zapier-sdk-experimental` bin (or pass `--experimental` to `zapier-sdk`). Flags and behaviour may change. [Request access](https://npsup.zapier.app/contact-us?product=Zapier%20SDK).
+
+### Inbox lifecycle
+```bash
+npx zapier-sdk create-trigger-inbox <app> <action> [--connection ID] [--inputs '...'] [--notification-url URL]
+npx zapier-sdk ensure-trigger-inbox <name> <app> <action> [--connection ID] [--inputs '...'] [--notification-url URL]
+npx zapier-sdk get-trigger-inbox <inbox>
+npx zapier-sdk list-trigger-inboxes [--name X] [--status X] [--page-size N] [--max-items N] [--cursor X] [--json]
+npx zapier-sdk update-trigger-inbox <inbox> [--notification-url URL]
+npx zapier-sdk pause-trigger-inbox <inbox>
+npx zapier-sdk resume-trigger-inbox <inbox>
+npx zapier-sdk delete-trigger-inbox <inbox>
+```
+
+`ensure-trigger-inbox` is idempotent on `(user, account, name)` — recommended for production.
+
+### Message handling
+```bash
+npx zapier-sdk lease-trigger-inbox-messages <inbox> [--lease-limit N] [--lease-seconds N]
+npx zapier-sdk ack-trigger-inbox-messages <inbox> <lease> [--messages id1,id2]
+npx zapier-sdk release-trigger-inbox-messages <inbox> <lease> [--messages id1,id2]
+npx zapier-sdk list-trigger-inbox-messages <inbox> [--page-size N] [--max-items N] [--cursor X]
+```
+
+### Drain / watch loops
+```bash
+npx zapier-sdk drain-trigger-inbox <inbox> \
+  [--concurrency N] [--lease-limit N] [--lease-seconds N] \
+  [--release-on-error] [--continue-on-error] \
+  [--max-messages N] \
+  [--exec ./handler | --exec-shell "cmd" | --json]
+
+npx zapier-sdk watch-trigger-inbox <inbox> \
+  [--concurrency N] [--lease-limit N] [--lease-seconds N] \
+  [--release-on-error] [--continue-on-error] \
+  [--max-drain-interval-seconds 60] \
+  [--exec ./handler | --exec-shell "cmd" | --json]
+```
+
+The three handler modes (`--exec`, `--exec-shell`, `--json`) are mutually exclusive. `--exec` runs a binary per message (no shell). `--exec-shell` runs a shell command. `--json` emits NDJSON to stdout, acking as each write completes.
+
+### Trigger input discovery
+```bash
+npx zapier-sdk list-trigger-input-fields <app> <action> [--connection ID] [--inputs '...']
+npx zapier-sdk get-trigger-input-fields-schema <app> <action> [--connection ID] [--inputs '...']
+npx zapier-sdk list-trigger-input-field-choices <app> <action> <input-field> [--connection ID] [--inputs '...']
+```
+
