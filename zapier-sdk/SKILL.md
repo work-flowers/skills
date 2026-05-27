@@ -422,39 +422,195 @@ Related capability flags that act as explicit opt-ins for sensitive operations:
 
 This is the governance answer to the existing "direct `fetch` calls aren't yet covered by org policy" caveat — approval-mode lets a server/agent run gated actions while still keeping a human in the loop.
 
-## Triggers API (Closed Beta)
+## Triggers API (Experimental)
 
-Real-time triggers are now available in **closed beta**. Subscribe to events from any of the 9,000+ connected apps in code — no polling, no custom webhook infrastructure.
+Real-time triggers let code react to events from any of the 9,000+ connected apps without polling or custom webhook infrastructure. Available as an experimental opt-in — methods and behaviour may change between versions.
 
-Quick shape:
+### Opting in
+
+Import experimental SDK methods from `@zapier/zapier-sdk/experimental` (the factory is still `createZapierSdk`):
 
 ```typescript
-import { createZapierSdk } from "@zapier/zapier-sdk";
-import { /* trigger methods */ } from "@zapier/zapier-sdk/experimental";
+import { createZapierSdk } from "@zapier/zapier-sdk/experimental";
 
-// 1. Create or ensure an inbox (idempotent by name)
-const { data: inbox } = await zapier.ensureTriggerInbox({
-  name: "new-github-issues",
-  app: "github",
-  action: "new_issue",
-  connection: ghConnId,
-});
+const zapier = createZapierSdk();
+```
 
-// 2. Drain available messages, or watch continuously
-await zapier.watchTriggerInbox({
-  inbox: inbox.id,
-  onMessage: async (msg) => { /* handle */ },
-  concurrency: 5,
+For the CLI, any one of these works:
+
+```bash
+npx zapier-sdk-experimental --help    # dedicated bin
+npx zapier-sdk --experimental --help  # flag on stable bin
+ZAPIER_EXPERIMENTAL=true npx zapier-sdk --help  # env var
+```
+
+### Core concepts
+
+- **Trigger** — an event source defined by an integration (e.g. Slack `channel_message`). Discover with `listTriggers`.
+- **Trigger inbox** — a server-side subscription for a specific `(app, action, connection, inputs)` tuple. Zapier connects to the app and buffers events.
+- **Message** — a buffered event. Has `id`, `created_at`, `payload` (raw event data), and `message_attributes` with `lease_count`, `error_message`, and `possible_duplicate_data`.
+- **Lease → ack → release** — messages are leased (hidden from other consumers) while processing, then acked (permanently removed) on success or released back to the pool on failure.
+
+Inbox lifecycle: `initializing` → `active` → `paused` → `deleting`, with `initialization_failure` as a terminal failure state. Check `paused_reason` if an inbox isn't active.
+
+### Discovery — find triggers and required inputs
+
+Mirrors the action discovery loop. Use `listTriggers` to find what an app exposes, then `listTriggerInputFields` to see what the subscription needs:
+
+```bash
+npx zapier-sdk-experimental list-triggers slack --json
+npx zapier-sdk-experimental list-trigger-input-fields slack channel_message \
+  --connection 12345 --json
+```
+
+```typescript
+const { data: triggers } = await zapier.listTriggers({ app: "slack" });
+const { data: fields } = await zapier.listTriggerInputFields({
+  app: "slack",
+  action: "channel_message",
+  connection: connId,
 });
 ```
 
-Key methods: `createTriggerInbox`, `ensureTriggerInbox` (get-or-create), `listTriggerInboxes`, `getTriggerInbox`, `pauseTriggerInbox`, `resumeTriggerInbox`, `leaseTriggerInboxMessages`, `ackTriggerInboxMessages`, `releaseTriggerInboxMessages`, `drainTriggerInbox`, `watchTriggerInbox`, `deleteTriggerInbox`. All also available as CLI subcommands (e.g. `npx zapier-sdk watch-trigger-inbox <inbox>`).
+### Ensure an inbox (idempotent by name)
 
-**Important caveats:**
-- Closed beta — methods and behaviour may change.
-- Import experimental SDK methods from `"@zapier/zapier-sdk/experimental"`.
-- CLI subcommands run via the `zapier-sdk-experimental` bin or by passing `--experimental` to `zapier-sdk`.
-- [Request access here](https://npsup.zapier.app/contact-us?product=Zapier%20SDK).
+`ensureTriggerInbox` is the production-safe choice — re-running with the same `name` returns the existing inbox instead of creating a duplicate. Use `createTriggerInbox` only for throwaway inboxes with auto-generated names.
+
+```typescript
+const { data: inbox } = await zapier.ensureTriggerInbox({
+  name: "my-slack-inbox",
+  app: "slack",
+  action: "channel_message",
+  connection: connId,
+  inputs: { channel: "C0123ABC456" },
+});
+```
+
+```bash
+npx zapier-sdk-experimental ensure-trigger-inbox my-slack-inbox slack channel_message \
+  --connection 12345 \
+  --inputs '{"channel": "C0123ABC456"}'
+```
+
+### Drain once vs watch continuously
+
+`drainTriggerInbox` leases all currently-available messages, runs your handler against each, and resolves when the inbox is empty. Right for cron jobs, scripts, or webhook handlers.
+
+`watchTriggerInbox` wraps drain in a poll loop with exponential backoff. Right for long-running consumers.
+
+```typescript
+const controller = new AbortController();
+process.on("SIGTERM", () => controller.abort());
+process.on("SIGINT", () => controller.abort());
+
+await zapier.watchTriggerInbox({
+  inbox: "my-slack-inbox",
+  onMessage: async (msg) => {
+    const { text, user, channel } = msg.payload as { text: string; user: string; channel: string };
+    console.log(`[${channel}] ${user}: ${text}`);
+  },
+  releaseOnError: true,
+  concurrency: 5,
+  signal: controller.signal,
+});
+```
+
+Aborting the controller cancels in-flight requests, releases unprocessed messages back to the inbox, and resolves cleanly (doesn't reject). Wire it to `SIGTERM`/`SIGINT` for graceful shutdown.
+
+CLI equivalents pipe each message as JSON to your handler:
+
+```bash
+npx zapier-sdk-experimental drain-trigger-inbox my-slack-inbox \
+  --exec node -- ./handle-message.js
+
+npx zapier-sdk-experimental watch-trigger-inbox my-slack-inbox \
+  --exec node -- ./handle-message.js
+```
+
+Use `--exec-shell` instead when you need pipes, redirects, or env expansion.
+
+### Error handling and the quarantine threshold
+
+Default behaviour is fail-fast — the first handler throw rejects the whole drain. Common knobs:
+
+- **`releaseOnError: true`** — release failed messages back to the pool when the drain finishes, instead of waiting out the full lease timeout.
+- **`continueOnError: true`** — keep draining when a handler throws. Errors route to an optional `onError(error, message)` observer. SDK-level errors (HTTP failures on lease/ack/release) still reject regardless.
+
+Two control-flow signals give per-message control without rejecting the drain:
+
+```typescript
+import { ZapierReleaseTriggerMessageSignal, ZapierAbortDrainSignal } from "@zapier/zapier-sdk/experimental";
+
+await zapier.drainTriggerInbox({
+  inbox: "my-slack-inbox",
+  onMessage: async (msg) => {
+    if (looksMalformed(msg.payload)) throw new ZapierReleaseTriggerMessageSignal(); // release this one, continue
+    if (shouldStop()) throw new ZapierAbortDrainSignal(); // finish current batch, resolve cleanly
+    await handle(msg);
+  },
+});
+```
+
+**Quarantine at lease_count = 5.** Once a message has been leased 5 times without being acked, Zapier quarantines it — it stops appearing in `lease`/`drain`/`watch` but remains visible in `listTriggerInboxMessages`. There's no end-user mechanism to recover a quarantined message today. Defend by detecting poison messages in `onMessage` and explicitly acking them before they hit the threshold:
+
+```typescript
+onMessage: async (msg) => {
+  if (msg.message_attributes.lease_count >= 3 && isKnownPoison(msg)) {
+    // Don't throw — returning acks the message and drops it.
+    console.warn(`Dropping poison message ${msg.id}`);
+    return;
+  }
+  await handle(msg);
+}
+```
+
+Pair with `continueOnError: true` so one bad message doesn't bring down the drain.
+
+### Push instead of poll: `notificationUrl`
+
+Running a server with a public endpoint? Pass `notificationUrl` when creating the inbox and Zapier POSTs to that URL whenever new messages arrive. Your endpoint calls `drainTriggerInbox` on demand — no poll loop, no backoff delay.
+
+```typescript
+await zapier.ensureTriggerInbox({
+  name: "my-slack-inbox-push",
+  app: "slack",
+  action: "channel_message",
+  connection: connId,
+  inputs: { channel: "C0123ABC456" },
+  notificationUrl: "https://my-server.example/trigger-webhook",
+});
+```
+
+`updateTriggerInbox` can change the `notificationUrl` on an existing inbox.
+
+### Inbox management
+
+```typescript
+await zapier.listTriggerInboxes({ status: "active" });
+await zapier.pauseTriggerInbox({ inbox: "my-slack-inbox" });   // stops collection, preserves buffered messages
+await zapier.resumeTriggerInbox({ inbox: "my-slack-inbox" });  // restarts collection
+await zapier.deleteTriggerInbox({ inbox: "my-slack-inbox" });  // cancels subscription
+```
+
+### Production deployment
+
+For long-running watchers, run under a process supervisor that restarts on crash and sends `SIGTERM` on stop so graceful shutdown runs:
+
+- **Linux servers** — systemd
+- **macOS dev** — launchd, or `brew services`
+- **Node-native** — pm2 (cross-platform, simplest for Cowork / CI-managed boxes)
+
+For headless deployment, use [client credentials](#authentication-options) — same setup as for actions.
+
+### Complete method list
+
+Discovery: `listTriggers`, `listTriggerInputFields`, `listTriggerInputFieldChoices`.
+
+Inbox management: `createTriggerInbox`, `ensureTriggerInbox`, `listTriggerInboxes`, `getTriggerInbox`, `updateTriggerInbox`, `pauseTriggerInbox`, `resumeTriggerInbox`, `deleteTriggerInbox`.
+
+Message processing: `drainTriggerInbox`, `watchTriggerInbox` (high-level); `leaseTriggerInboxMessages`, `ackTriggerInboxMessages`, `releaseTriggerInboxMessages`, `listTriggerInboxMessages` (primitives).
+
+All available as CLI subcommands via the `zapier-sdk-experimental` bin. Full walkthrough at <https://docs.zapier.com/sdk/triggers>.
 
 ## Reference Files
 
