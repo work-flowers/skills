@@ -234,7 +234,24 @@ The SDK can also run **inside** a JavaScript Code step in any Zap, with full acc
 
 1. In the Zap editor, add a **Code by Zapier** step → event **Run JavaScript** → **Open in Code Editor**.
 2. Click the **Packages** icon in the left sidebar.
-3. Toggle **`@zapier/zapier-sdk (latest)`** on. Zapier auto-imports the package and initialises `zapier` at the top of the file.
+3. Toggle **`@zapier/zapier-sdk (latest)`** on. Zapier rewrites the step with a scaffold that imports the SDK, initialises `zapier`, and wraps your code in a `main` function:
+
+```javascript
+import { createZapierSdk } from '@zapier/zapier-sdk';
+const zapier = createZapierSdk();
+
+/**
+ * @param {{inputData: InputData}}
+ */
+export default async function main({ inputData }) {
+  // this is wrapped in an `async` function — use await throughout
+  return { hello: "world" };
+}
+```
+
+Put your per-run logic **inside `main`**, and keep constants and helper functions at **module scope** (above `main`) so they aren't rebuilt on every invocation. Whatever object you `return` becomes the step's output.
+
+> **`connections` is a runtime global, not a `main` argument.** The scaffold only destructures `{ inputData }`, but Zapier also injects a `connections` map at module scope (alongside `zapier`). Reference it directly — `connections["slack"]`. Do **not** add it to the `main({ inputData })` destructure: a destructured `connections` would be `undefined` and shadow the real global.
 
 The SDK is JavaScript only — Python Code steps don't support it. Code triggers (the trigger variant of Code by Zapier) also don't support the SDK; it's actions only.
 
@@ -255,11 +272,11 @@ Repeat for each app you want the step to call. Only the Zap owner can add or edi
 
 Two patterns. Both work; pick whichever reads better for the step.
 
+The snippets below go **inside `main`** (see the scaffold above); `zapier` and `connections` come from module scope.
+
 **Proxy pattern** — bind the connection to an app once, then call actions cleanly:
 
 ```javascript
-// (zapier is auto-imported — no createZapierSdk() call needed)
-
 const notion = zapier.apps.notion({ connectionId: connections["notion"] });
 
 const { data: page } = await notion.write.create_database_item({
@@ -321,6 +338,8 @@ You don't pass the `--connection` value into the Code step — it's only needed 
 ### Limits and gotchas
 
 - **JavaScript only.** Python Code steps don't support the SDK.
+- **Your code lives inside `main`.** The scaffold is `export default async function main({ inputData }) { … }` — per-run logic goes inside; constants/helpers at module scope. Earlier docs implied a bare top-level body; it's a wrapped function.
+- **`connections` is a module-scope global, not a `main` argument.** Reference `connections["key"]` directly; never add `connections` to the `main({ inputData })` destructure or the `undefined` param shadows the real global.
 - **Actions only.** The SDK is not available in Code *triggers*. Triggers / event subscriptions inside Code steps are on the roadmap, not yet shipped.
 - **Per-step runtime caps still apply.** Same memory and wall-clock limits as any Code step — up to ~10 minutes on paid plans. Long-running scrapes or sync jobs that exceed this should run externally.
 - **Direct `zapier.fetch` calls aren't yet covered by org governance.** Pre-built actions respect your org's app/action restrictions; raw API calls don't yet. Direct API governance is on the roadmap.
