@@ -238,7 +238,7 @@ npx zapier-sdk delete-table-fields <table> <fields>
 npx zapier-sdk create-table-records <table> <records-json> [--key-mode names|ids]
 npx zapier-sdk get-table-record <table> <record> [--key-mode names|ids] [--json]
 npx zapier-sdk list-table-records <table> \
-  [--filters '[{"fieldKey":"f1","operator":"equals","value":"active"}]'] \
+  [--filters '[{"fieldKey":"f1","operator":"is","value":"active"}]'] \
   [--sort '{"fieldKey":"f1","direction":"desc"}'] \
   [--key-mode names|ids] \
   [--page-size N] [--max-items N] [--cursor X] [--json]

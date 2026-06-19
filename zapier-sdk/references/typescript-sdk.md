@@ -272,7 +272,7 @@ await zapier.createTableRecords({ table: table.id, records: [...] });
 const { data: records } = await zapier.listTableRecords({
   table: table.id,
   filters: [
-    { fieldKey: "Status", operator: "equals", value: "active" },
+    { fieldKey: "Status", operator: "is", value: "active" },
   ],
   sort: { fieldKey: "created_at", direction: "desc" },
 });
